@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Icons;
 import 'package:flutter/widgets.dart';
 import 'package:video_player/video_player.dart';
 import 'package:screen_brightness/screen_brightness.dart';
@@ -11,6 +12,7 @@ import 'package:volume_controller/volume_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 
 import '../models/channel.dart';
 import '../models/epg_program.dart';
@@ -30,8 +32,10 @@ import 'native_capture.dart';
 import 'remote_admin_service.dart';
 import 'reservation_manager.dart';
 import 'source_manager.dart';
+import 'web_env.dart';
 import 'web_launch.dart';
 import 'network_monitor.dart';
+import 'osd_bus.dart';
 
 /// 播放器状态
 enum PlayerState { idle, loading, playing, paused, error, ended, waitingForNetwork }
@@ -69,12 +73,6 @@ class PlayerController extends ChangeNotifier {
   final DlnaService dlnaService = DlnaService();
   bool _isCasting = false;
   Channel? _preCastChannel; // 投屏前的频道，用于断开后恢复
-
-  // 回看/点播模式标记：仅当用户从节目菜单主动选择回看/点播时为 true。
-  // 用于区分「直播频道播放 MP4 文件」（按返回应直接弹退出框）和
-  // 「节目菜单点播视频」（按返回应回到节目菜单继续选台）。
-  bool _isCatchupPlayback = false;
-  bool get isCatchupPlayback => _isCatchupPlayback;
 
   // 局域网 Web 管理服务（手机扫码后增删改直播源/EPG）
   final RemoteAdminService remoteAdminService = RemoteAdminService();
@@ -155,14 +153,22 @@ class PlayerController extends ChangeNotifier {
   PlayerSettings get settings => _settings;
   VideoPlayerController? get videoController => _videoController;
   List<ChannelCategory> get categories => _categories;
+  bool get isLoadingPlaylist => _isLoadingPlaylist;
+  bool get isLoadingEpg => _isLoadingEpg;
+  String? get lastError => _lastError;
+  bool get isRecording => _isRecording;
 
-  /// 未被用户隐藏的分类（左侧抽屉一级列表使用）
-  List<ChannelCategory> get visibleCategories => _categories
-      .where((c) => !_settings.hiddenCategoryIds.contains(c.id))
-      .toList(growable: false);
+  /// 网页录制已落盘字节数（录制指示器显示）
+  int get webRecordingBytes => _webRecBytes;
+  bool get isDesktop => !kIsWeb && MediaCaptureService.isDesktop;
+  bool get isFullscreen => _isFullscreen;
+  bool get isCasting => _isCasting;
+  bool get isMuted => _isMuted;
 
-  bool isCategoryHidden(String id) =>
-      _settings.hiddenCategoryIds.contains(id);
+  bool get isPlaying =>
+      _webPageActive ? _webPlaying : _state == PlayerState.playing;
+  bool get isInitialized =>
+      _videoController != null && _videoController!.value.isInitialized;
 
   // 用户收藏的频道 ID（独立持久化，不改动频道/分类结构）
   final Set<String> _favoriteChannelIds = <String>{};
@@ -180,23 +186,6 @@ class PlayerController extends ChangeNotifier {
     }
     return result;
   }
-
-  bool get isLoadingPlaylist => _isLoadingPlaylist;
-  bool get isLoadingEpg => _isLoadingEpg;
-  String? get lastError => _lastError;
-  bool get isRecording => _isRecording;
-
-  /// 网页录制已落盘字节数（录制指示器显示）
-  int get webRecordingBytes => _webRecBytes;
-  bool get isDesktop => !kIsWeb && MediaCaptureService.isDesktop;
-  bool get isFullscreen => _isFullscreen;
-  bool get isCasting => _isCasting;
-  bool get isMuted => _isMuted;
-
-  bool get isPlaying =>
-      _webPageActive ? _webPlaying : _state == PlayerState.playing;
-  bool get isInitialized =>
-      _videoController != null && _videoController!.value.isInitialized;
 
   PlayerController() {
     _init();
@@ -224,6 +213,11 @@ class PlayerController extends ChangeNotifier {
       await refreshChannels();
     }
 
+    // 如果有选中的 EPG，加载节目单
+    if (sourceManager.currentEpg != null) {
+      await refreshEpg();
+    }
+
     // 先启动 DLNA 投屏接收服务（不等系统值初始化，避免被阻塞）；
     // 用户可在设置中关闭
     if (_settings.dlnaEnabled) {
@@ -235,16 +229,10 @@ class PlayerController extends ChangeNotifier {
     }
     _initSystemValues();
 
-    // 频道加载完毕后立即恢复上次播放的频道——不等 EPG。
-    // 大节目单下载+解析耗时数秒，放在起播之后会让用户长时间盯着黑屏。
+    // 频道加载完毕后，恢复上次退出时播放的频道
     await restoreLastChannel();
-    notifyListeners();
 
-    // EPG（节目单）在播放恢复后于后台加载，完成时 refreshEpg 内部
-    // 会 notifyListeners 刷新抽屉；不 await，不阻塞启动与起播。
-    if (sourceManager.currentEpg != null) {
-      unawaited(refreshEpg());
-    }
+    notifyListeners();
   }
 
   // ==================== 网络状态处理 ====================
@@ -316,11 +304,11 @@ class PlayerController extends ChangeNotifier {
   static const _kLastChannel = 'last_channel_v1';
 
   /// 播放成功后记录当前频道，供下次启动恢复
-  Future<void> _saveLastChannel() async {
+  Future<void> _saveLastChannel({Channel? channel}) async {
     // 投屏会话不记录：投屏链接是临时的（如手机推来的抖音直播），
     // 记录后下次启动会尝试恢复一个已失效的投屏地址
     if (_isCasting) return;
-    final ch = _currentChannel;
+    final ch = channel ?? _currentChannel;
     if (ch == null) return;
     try {
       final p = await SharedPreferences.getInstance();
@@ -730,21 +718,21 @@ class PlayerController extends ChangeNotifier {
   Future<void> _onReservationTriggered(ProgramReservation r) async {
     Channel? channel;
     if (r.autoSwitch || (r.autoRecord && isDesktop)) {
-      // 优先从当前播放列表按频道 ID 反查（地址新鲜）；预约存档的
-      // 直播流 URL 常带 token/时效，到点直接用很可能已失效 = 预约
-      // 「不好使」。反查不到（频道已删除）才回退存档地址。
-      channel = _resolveReservationChannel(r);
-      channel ??= r.streamUrls.isNotEmpty
-          ? Channel(
-              id: r.channelId,
-              name: r.channelName.isNotEmpty ? r.channelName : r.programTitle,
-              logoUrl: r.logoUrl,
-              streamUrls: r.streamUrls,
-              categoryId: '',
-              tvgId: r.tvgId,
-              tvgName: r.tvgName,
-            )
-          : null;
+      // 优先使用预约时记录的播放地址直接播放（不依赖当前播放列表）
+      if (r.streamUrls.isNotEmpty) {
+        channel = Channel(
+          id: r.channelId,
+          name: r.channelName.isNotEmpty ? r.channelName : r.programTitle,
+          logoUrl: r.logoUrl,
+          streamUrls: r.streamUrls,
+          categoryId: '',
+          tvgId: r.tvgId,
+          tvgName: r.tvgName,
+        );
+      } else {
+        // 兼容旧预约记录：按 ID/tvgId/名称从当前播放列表反查
+        channel = _resolveReservationChannel(r);
+      }
     }
     if (r.autoSwitch && channel != null) {
       await playChannel(channel);
@@ -870,7 +858,6 @@ class PlayerController extends ChangeNotifier {
     }
     _webPageActive = false;
     _webPageForeground = false;
-    _isCatchupPlayback = false;
     _currentChannel = channel;
     _sourceIndex = 0;
     await _playCurrentSource();
@@ -1086,6 +1073,142 @@ class PlayerController extends ChangeNotifier {
     WinHotkeys().setCursorHide(false);
     WinHotkeys().setWebForward(false);
     notifyListeners();
+    // WebView 平台视图销毁后清理其用户数据目录：网页视频播放久了
+    // 缓存膨胀会让后续频道读入变慢（用户实测删除目录后立即变快）。
+    // InPrivate 下文件关闭即释放，可整个删除；仍有锁定时
+    // cleanWebView2Cache 内部退化为只删缓存子目录，下次启动再全删。
+    Timer(const Duration(milliseconds: 1500), () {
+      try {
+        cleanWebView2Cache();
+      } catch (_) {}
+    });
+  }
+
+  /// 嗅探转原生播放失败时回退用的原网页频道
+  Channel? _lastWebChannel;
+  bool _sniffedFromWeb = false;
+
+  /// 已判定无法内置播放、放弃自动切换的网页地址（内置播放失败回退
+  /// 网页后，同一页面本次运行内不再重复嗅探切换，避免循环）
+  String? _abandonedSniffWebUrl;
+  bool isSniffAbandonedFor(String webUrl) =>
+      _abandonedSniffWebUrl == webUrl;
+
+  /// 预检嗅探到的媒体流能否被内置播放器（ffmpeg 内核）直接播放。
+  /// 带 Referer/UA 模拟网页环境；HLS/DASH 下载清单文本判断是否
+  /// DRM/自定义加密，HTTP-FLV 校验文件头。
+  Future<bool> checkSniffedStreamPlayable({
+    required String url,
+    required String kind,
+    required String referer,
+    required String userAgent,
+  }) async {
+    Map<String, String> hdrs() => {
+          'User-Agent': userAgent,
+          if (referer.isNotEmpty) 'Referer': referer,
+          'Accept': '*/*',
+        };
+    try {
+      if (kind == 'hls') {
+        final r = await http
+            .get(Uri.parse(url), headers: hdrs())
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final body = r.body;
+        if (!body.contains('#EXTM3U')) return false;
+        // FairPlay / SAMPLE-AES / 自定义 WASM 解密：内置播不了
+        if (body.contains('SAMPLE-AES') ||
+            body.contains('skd://') ||
+            body.contains('streamingkeydelivery') ||
+            body.contains('METHOD=UNKNOWN')) {
+          return false;
+        }
+        // AES-128 标准 HLS 加密 ffmpeg 可直接解密（key 可访问时），放行
+        return true;
+      } else if (kind == 'dash') {
+        final r = await http
+            .get(Uri.parse(url), headers: hdrs())
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final body = r.body;
+        if (!body.contains('<MPD')) return false;
+        // 含 ContentProtection（Widevine/PlayReady/Marlin）= DRM
+        if (body.contains('ContentProtection')) return false;
+        return true;
+      } else if (kind == 'flv') {
+        final h = hdrs()..['Range'] = 'bytes=0-4095';
+        final r =
+            await http.get(Uri.parse(url), headers: h).timeout(
+                const Duration(seconds: 8));
+        if (r.statusCode != 200 && r.statusCode != 206) return false;
+        final ct = r.headers['content-type'] ?? '';
+        if (ct.contains('x-flv') || ct.contains('video-flv')) return true;
+        final b = r.bodyBytes;
+        // FLV 文件头：0x46 0x4C 0x56 ("FLV")
+        return b.length >= 3 && b[0] == 0x46 && b[1] == 0x4C && b[2] == 0x56;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 把网页内 XHR/fetch 嗅探到的真实媒体流（m3u8/mpd/flv 等）
+  /// 交给内置原生播放器全屏播放（完整遥控器/进度/录制交互）。
+  /// 保留原网页频道的全部身份字段（id/tvgId/台名/台标/分类），
+  /// 左上角台名与右侧 EPG 节目单保持不变。
+  Future<void> playSniffedWebStream({
+    required String url,
+    required String referer,
+    String? userAgent,
+  }) async {
+    final web =
+        (_currentChannel != null && _currentChannel!.isWebPage)
+            ? _currentChannel
+            : null;
+    _lastWebChannel = web;
+    exitWebPage();
+    const desktopUa =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    final ua = (userAgent != null && userAgent.trim().isNotEmpty)
+        ? userAgent.trim()
+        : desktopUa;
+    final Channel ch;
+    if (web != null) {
+      // 只换流地址与防盗链头，身份字段原样保留：EPG 按原 id/tvgId
+      // 匹配，左上角台名/台标不丢
+      ch = web.copyWith(
+        streamUrls: [url],
+        userAgent: ua,
+        httpReferer: referer,
+      );
+    } else {
+      ch = Channel(
+        id: 'sniff_${DateTime.now().millisecondsSinceEpoch}',
+        name: '网页视频',
+        streamUrls: [url],
+        categoryId: '',
+        userAgent: ua,
+        httpReferer: referer,
+      );
+    }
+    _sniffedFromWeb = true;
+    await playChannel(ch);
+  }
+
+  /// 嗅探流原生播放失败：标记本页放弃自动切换，提示并自动回退到
+  /// 原网页全屏继续观看
+  void _sniffPlaybackFailed() {
+    if (!_sniffedFromWeb) return;
+    _sniffedFromWeb = false;
+    final web = _lastWebChannel;
+    if (web != null) _abandonedSniffWebUrl = web.webPageUrl;
+    OsdBus.show('该直播流为加密格式，已切换网页播放器全屏观看',
+        icon: Icons.language);
+    if (web != null) {
+      Future(() => _openWebPageChannel(web));
+    }
   }
 
   /// 换台/退出网页时复位网页录制状态（旧 WebView 销毁后 JS 上下文
@@ -1118,9 +1241,9 @@ class PlayerController extends ChangeNotifier {
   /// 下一个频道
   Future<void> nextChannel() => playAdjacentChannel(1);
 
-  /// 按偏移量切换频道（跨可见分类、循环；隐藏分类不参与）
+  /// 按偏移量切换频道（跨分类、循环）
   Future<void> playAdjacentChannel(int delta) async {
-    final all = flatChannels;
+    final all = [for (final cat in _categories) ...cat.channels];
     if (all.isEmpty) return;
     if (_currentChannel == null) {
       await playChannel(all.first);
@@ -1137,10 +1260,9 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== 频道序号（数字选台） ====================
 
-  /// 可见分类下的全部频道按播放列表顺序展平（序号 = 下标 + 1）。
-  /// 隐藏分类不参与数字选台/上下切台/序号展示
+  /// 全部频道按播放列表顺序展平（序号 = 下标 + 1）
   List<Channel> get flatChannels =>
-      [for (final cat in visibleCategories) ...cat.channels];
+      [for (final cat in _categories) ...cat.channels];
 
   /// 频道序号（1 起），不在列表中返回 null
   int? channelNumberOf(Channel? ch) {
@@ -1197,6 +1319,10 @@ class PlayerController extends ChangeNotifier {
     final headers = <String, String>{};
     if (channel.userAgent.trim().isNotEmpty) {
       headers['User-Agent'] = channel.userAgent.trim();
+    }
+    // 网页嗅探出的真实流普遍校验 Referer 防盗链
+    if (channel.httpReferer.trim().isNotEmpty) {
+      headers['Referer'] = channel.httpReferer.trim();
     }
 
     // ExoPlayer（安卓）不嗅探内容：live.php?id=... 这类脚本入口 302 跳到
@@ -1291,8 +1417,15 @@ class PlayerController extends ChangeNotifier {
       await WakelockPlus.enable();
 
       _state = PlayerState.playing;
-      // 记录当前频道，下次启动时恢复
-      await _saveLastChannel();
+      // 嗅探流起播成功：清回退标记
+      _sniffedFromWeb = false;
+      // 记录当前频道，下次启动时恢复。网页嗅探接管时保存的是原网页
+      // 频道（webview://），而不是带时效 token 的嗅探流地址
+      if (_lastWebChannel != null && _currentChannel?.id == _lastWebChannel!.id) {
+        await _saveLastChannel(channel: _lastWebChannel);
+      } else {
+        await _saveLastChannel();
+      }
     } on TimeoutException {
       if (gen != _playGeneration) {
         discardLate();
@@ -1319,6 +1452,10 @@ class PlayerController extends ChangeNotifier {
         // 不再一直显示"已连接"或等待
         dlnaService.clearCurrentMedia();
       }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
+        return;
+      }
       _state = PlayerState.error;
     } catch (e) {
       if (gen != _playGeneration) {
@@ -1334,6 +1471,10 @@ class PlayerController extends ChangeNotifier {
       }
       if (_isCasting) {
         dlnaService.clearCurrentMedia();
+      }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
+        return;
       }
       _state = PlayerState.error;
     }
@@ -1354,6 +1495,10 @@ class PlayerController extends ChangeNotifier {
       // 播放中途出错且有备用源时自动切换
       if (hasNextSource) {
         nextSource();
+        return;
+      }
+      if (_sniffedFromWeb) {
+        _sniffPlaybackFailed();
         return;
       }
       _state = PlayerState.error;
@@ -1535,8 +1680,6 @@ class PlayerController extends ChangeNotifier {
   static const _kUiScale = 'settings_ui_scale';
   static const _kUiScaleAuto = 'settings_ui_scale_auto';
   static const _kRemoteAdmin = 'settings_remote_admin';
-  static const _kAspectRatioMode = 'settings_aspect_ratio_mode';
-  static const _kHiddenCategoryIds = 'settings_hidden_category_ids';
   static const _kFavoriteChannelIds = 'omplayer_favorite_channel_ids';
 
   Future<void> _loadSettings() async {
@@ -1559,12 +1702,6 @@ class PlayerController extends ChangeNotifier {
         uiScale: p.getDouble(_kUiScale) ?? 1.0,
         uiScaleAuto: p.getBool(_kUiScaleAuto) ?? true,
         remoteAdminEnabled: p.getBool(_kRemoteAdmin) ?? true,
-        aspectRatioMode: AspectRatioMode.values.firstWhere(
-          (m) => m.name == p.getString(_kAspectRatioMode),
-          orElse: () => AspectRatioMode.auto,
-        ),
-        hiddenCategoryIds:
-            p.getStringList(_kHiddenCategoryIds) ?? const <String>[],
       );
       _favoriteChannelIds
         ..clear()
@@ -1592,9 +1729,6 @@ class PlayerController extends ChangeNotifier {
       await p.setDouble(_kUiScale, _settings.uiScale);
       await p.setBool(_kUiScaleAuto, _settings.uiScaleAuto);
       await p.setBool(_kRemoteAdmin, _settings.remoteAdminEnabled);
-      await p.setString(_kAspectRatioMode, _settings.aspectRatioMode.name);
-      await p.setStringList(
-          _kHiddenCategoryIds, _settings.hiddenCategoryIds);
     } catch (_) {}
   }
 
@@ -1664,25 +1798,6 @@ class PlayerController extends ChangeNotifier {
     _settings = _settings.copyWith(showClock: value);
     _saveSettings();
     clockVisible.value = value;
-  }
-
-  /// 切换画面比例模式（视频层监听 settings 变化即时 rebuild）
-  void setAspectRatioMode(AspectRatioMode mode) {
-    if (_settings.aspectRatioMode == mode) return;
-    _settings = _settings.copyWith(aspectRatioMode: mode);
-    _saveSettings();
-    notifyListeners();
-  }
-
-  /// 设置某个分类是否在左侧抽屉中隐藏
-  Future<void> setCategoryHidden(String id, bool hidden) async {
-    final set = _settings.hiddenCategoryIds.toSet();
-    final changed = hidden ? set.add(id) : set.remove(id);
-    if (!changed) return;
-    _settings =
-        _settings.copyWith(hiddenCategoryIds: set.toList(growable: false));
-    await _saveSettings();
-    notifyListeners();
   }
 
   /// 应用窗口置顶设置（全屏时强制置顶，退出全屏后按设置恢复）
@@ -2006,40 +2121,58 @@ class PlayerController extends ChangeNotifier {
     );
   }
 
+  // ==================== 频道收藏 ====================
+
+  /// 切换频道收藏状态，返回切换后是否为已收藏
+  Future<bool> toggleFavoriteChannel(String channelId) async {
+    bool now;
+    if (_favoriteChannelIds.contains(channelId)) {
+      _favoriteChannelIds.remove(channelId);
+      now = false;
+    } else {
+      _favoriteChannelIds.add(channelId);
+      now = true;
+    }
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setStringList(
+          _kFavoriteChannelIds, _favoriteChannelIds.toList(growable: false));
+    } catch (_) {}
+    notifyListeners();
+    return now;
+  }
+
   // ==================== 预约 ====================
 
   /// 切换节目预约状态
-  ///
-  /// [channel] 是抽屉当前框选的频道（节目单的属主，绝无歧义），必须优先
-  /// 使用——否则 EPG 频道 ID 匹配不上播放列表时兜底到 _currentChannel，
-  /// 用户浏览别的频道节目单预约就会「到点串台」。
-  Future<bool> toggleReservation(EpgProgram program, {Channel? channel}) async {
-    final ch = _resolveChannelForProgram(program, channel);
+  Future<bool> toggleReservation(EpgProgram program) async {
+    // 防御：已结束或正在直播的节目不允许预约（UI 已拦，
+    // 此处兜底避免任何残留调用写入无效预约）
+    if (program.isPast || program.isNowPlaying) return false;
+    // 找到对应频道，记录：时间、节目名、频道名、播放地址（全部备用源）、
+    // 台标、EPG 标识。到点后直接用记录的地址播放，避免按名称反查跳错台。
+    // 注意：预约只能用「精确匹配」的频道，匹配不到时以当前频道兜底
+    // （EPG 面板展示的就是当前频道的节目单），绝不能用名称模糊匹配，
+    // 否则像 "CCTV" 这样的短名会错误命中列表里第一个 CCTV 频道。
+    final channel = _findChannelExact(program) ?? _currentChannel;
     final r = ProgramReservation(
       id: 'res_${program.channelId}_${program.startTime.millisecondsSinceEpoch}',
-      channelId: ch?.id ?? program.channelId,
-      channelName: ch?.name ?? '',
+      channelId: channel?.id ?? program.channelId,
+      channelName: channel?.name ?? '',
       programTitle: program.title,
       startTime: program.startTime,
       endTime: program.endTime,
       autoSwitch: true,
       autoRecord: false,
       createdAt: DateTime.now(),
-      streamUrls: ch?.streamUrls ?? const [],
-      logoUrl: ch?.logoUrl ?? '',
-      tvgId: ch?.tvgId ?? '',
-      tvgName: ch?.tvgName ?? program.channelId,
+      streamUrls: channel?.streamUrls ?? const [],
+      logoUrl: channel?.logoUrl ?? '',
+      tvgId: channel?.tvgId ?? '',
+      tvgName: channel?.tvgName ?? program.channelId,
     );
     final result = await reservationManager.toggleReservation(r);
     notifyListeners();
     return result;
-  }
-
-  /// 节目所属频道解析：抽屉框选的频道优先，其次按 EPG 频道 ID 精确匹配，
-  /// 最后兜底当前播放频道。预约/查询/灰态三处必须走同一解析，
-  /// 否则状态互相错乱（预约成功但列表不亮、串台）。
-  Channel? _resolveChannelForProgram(EpgProgram program, [Channel? channel]) {
-    return channel ?? _findChannelExact(program) ?? _currentChannel;
   }
 
   /// 根据 EPG 节目反查对应频道（tvgId 精确匹配，其次名称模糊匹配）
@@ -2094,59 +2227,13 @@ class PlayerController extends ChangeNotifier {
 
   /// 检查节目是否已预约。
   /// 频道解析必须与 [toggleReservation] 完全一致
-  /// （抽屉框选频道 → 精确匹配 → 当前频道）：否则无 tvg-id 的频道会
+  /// （精确匹配不到时兜底当前频道）：否则无 tvg-id 的频道会
   /// 「预约时存频道UUID、查询时用XMLTV-id」导致图标不亮、
   /// 第二次按 OK 仍提示"已预约"。
-  bool isProgramReserved(EpgProgram program, {Channel? channel}) {
-    final ch = _resolveChannelForProgram(program, channel);
-    final cid = ch?.id ?? program.channelId;
+  bool isProgramReserved(EpgProgram program) {
+    final channel = _findChannelExact(program) ?? _currentChannel;
+    final cid = channel?.id ?? program.channelId;
     return reservationManager.isReserved(cid, program.startTime);
-  }
-
-  /// 检查节目预约是否已触发执行（EPG 灰态「已播放」）。
-  /// 频道解析必须与 toggleReservation/isProgramReserved 完全一致。
-  bool isReservationTriggered(EpgProgram program, {Channel? channel}) {
-    final ch = _resolveChannelForProgram(program, channel);
-    final cid = ch?.id ?? program.channelId;
-    return reservationManager.isTriggered(cid, program.startTime);
-  }
-
-  // ==================== 频道收藏 ====================
-
-  /// 切换频道收藏状态，返回切换后是否为已收藏
-  Future<bool> toggleFavoriteChannel(String channelId) async {
-    bool now;
-    if (_favoriteChannelIds.contains(channelId)) {
-      _favoriteChannelIds.remove(channelId);
-      now = false;
-    } else {
-      _favoriteChannelIds.add(channelId);
-      now = true;
-    }
-    try {
-      final p = await SharedPreferences.getInstance();
-      await p.setStringList(
-          _kFavoriteChannelIds, _favoriteChannelIds.toList(growable: false));
-    } catch (_) {}
-    notifyListeners();
-    return now;
-  }
-
-  // ==================== EPG 回看 ====================
-
-  /// 播放过期节目的回看流。以临时频道（保留原频道 id/名称/台标/EPG，
-  /// 仅替换播放地址）起播，不改动订阅列表；无法构造回看地址返回 false。
-  Future<bool> playCatchup(Channel channel, EpgProgram program) async {
-    final url = channel.buildCatchupUrl(
-      start: program.startTime,
-      end: program.endTime,
-      epgCatchupSource: program.catchupUrl,
-    );
-    if (url == null || url.isEmpty) return false;
-    _isCatchupPlayback = true;
-    final temp = channel.copyWith(streamUrls: [url]);
-    await playChannel(temp);
-    return true;
   }
 
   // ==================== 录制与截图（fvp/MDK 原生，桌面端） ====================

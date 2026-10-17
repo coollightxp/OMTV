@@ -56,17 +56,6 @@ class XmltvEpgParser {
             prog.findElements('title').firstOrNull?.innerText ?? '未知节目';
         final desc = prog.findElements('desc').firstOrNull?.innerText ?? '';
 
-        // 回看地址模板：优先子元素 <catchup-source>，其次同名属性
-        final catchupSource = (prog
-                    .findElements('catchup-source')
-                    .firstOrNull
-                    ?.innerText
-                    .trim()
-                    .isNotEmpty ??
-                false)
-            ? prog.findElements('catchup-source').first.innerText.trim()
-            : prog.getAttribute('catchup-source')?.trim();
-
         result.putIfAbsent(channelId, () => []).add(EpgProgram(
               id: '${channelId}_${startTime.millisecondsSinceEpoch}',
               channelId: channelId,
@@ -74,10 +63,6 @@ class XmltvEpgParser {
               description: desc,
               startTime: startTime,
               endTime: endTime,
-              catchupUrl:
-                  (catchupSource != null && catchupSource.isNotEmpty)
-                      ? catchupSource
-                      : null,
             ));
       }
 
@@ -94,24 +79,19 @@ class XmltvEpgParser {
     );
   }
 
-  /// 归一化名称：忽略大小写、空格、标点、括号差异。
-  /// 注意不删 '+'：CCTV5+ 必须与 CCTV5 区分开，否则两者在
-  /// 「完整原名精确匹配」一步互相撞车（CCTV5+ 显示 CCTV5 的节目）
+  /// 归一化名称：忽略大小写、空格、标点、括号差异
   static String norm(String s) =>
-      s.toLowerCase().replaceAll(RegExp(r'[\s\-_（）()\[\].·、,，]'), '');
+      s.toLowerCase().replaceAll(RegExp(r'[\s\-_（）()\[\].·、,，+]'), '');
 
-  // '+'、'plus' 两种加号写法（CCTV5+ / CCTV5Plus / CCTV-5Plus 均常见）
-  static final _cctvRe = RegExp(r'cctv[-\s]*(\d+)\s*(\+|plus)?');
+  static final _cctvRe = RegExp(r'cctv[-\s]*(\d+)\s*(\+?)');
 
-  /// 仅当名称里包含 "CCTV+数字"（如 CCTV4中文国际、CCTV-1综合、CCTV5+体育赛事、
-  /// CCTV5Plus）时，提取英文核心 "cctv4"/"cctv1"/"cctv5+"；其他频道一律返回 null，
+  /// 仅当名称里包含 "CCTV+数字"（如 CCTV4中文国际、CCTV-1综合、CCTV5+体育赛事）
+  /// 时，提取英文核心 "cctv4"/"cctv1"/"cctv5+"；其他频道一律返回 null，
   /// 仍按完整原名匹配（湖南卫视、北京卫视等不去汉字）
   static String? cctvCore(String s) {
     final m = _cctvRe.firstMatch(s.toLowerCase());
     if (m == null) return null;
-    final g2 = m.group(2) ?? '';
-    final plus = g2 == '+' || g2 == 'plus';
-    return 'cctv${m.group(1)}${plus ? '+' : ''}';
+    return 'cctv${m.group(1)}${m.group(2) ?? ''}';
   }
 
   /// 找到频道对应的 EPG 频道 id
