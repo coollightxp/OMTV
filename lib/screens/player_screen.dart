@@ -121,12 +121,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   String _msgOsdText = '';
   IconData _msgOsdIcon = Icons.info_outline;
 
-  // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）
-  static const String _appVersion = '1.0.167';
+  // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
+  // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
+  static const String _appVersion = '1.0.0';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
-  int _exitDialogFocusIndex = 0; // 0=返回, 1=退出, 2=关机
+  // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
+  int _exitDialogFocusIndex = 0;
   bool _exitDialogOpen = false;
+
+  // 投屏中按返回：第一次只提示，3 秒内再按一次才断开投屏，
+  // 避免误触直接退出投屏（也可直接点面板上的「断开投屏」按钮）
+  bool _castExitArmed = false;
+  Timer? _castExitTimer;
 
   /// 对话框内部 StatefulBuilder 的刷新句柄：遥控器 ←/→ 改焦点后
   /// 通过它只重建对话框（外层 setState 不会触发 showDialog 内容重建）
@@ -404,6 +411,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     _cursorHideTimer?.cancel();
     _drawerHideTimer?.cancel();
+    _castExitTimer?.cancel();
     _osdTimer?.cancel();
     _numTimer?.cancel();
     _okLongTimer?.cancel();
@@ -607,11 +615,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         },
                       ),
                     ),
-                    // 右边缘
+                    // 右边缘：底部留出信息面板高度，避免鼠标去点面板右侧
+                    // 按钮（设置/清晰度）时误触边缘热区，EPG 面板弹出把
+                    // 按钮盖住；EPG 仍可从中间区域或用面板内的 EPG 按钮打开
                     Positioned(
                       right: 0,
                       top: 0,
-                      bottom: 0,
+                      bottom: 190,
                       width: 20,
                       child: MouseRegion(
                         onEnter: (_) {
@@ -849,7 +859,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (c.isCasting) {
-      // v1.0.98 已有的标准投屏停止/恢复逻辑
+      // 投屏中：返回键需连按两次才断开（3 秒内），避免误触直接退出投屏；
+      // 也可直接点底部面板上的「断开投屏」按钮一次性断开
+      if (!_castExitArmed) {
+        _castExitArmed = true;
+        _castExitTimer?.cancel();
+        _castExitTimer =
+            Timer(const Duration(seconds: 3), () => _castExitArmed = false);
+        _showOsd('再按一次返回断开投屏', icon: Icons.cast_connected);
+        return;
+      }
+      _castExitArmed = false;
+      _castExitTimer?.cancel();
       await c.stopCastAndRestore();
       return;
     }
@@ -876,7 +897,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 无任何可关闭项：退出前确认，避免误触
     _exitDialogOpen = true;
     _exitDialogFocusIndex = 0; // 默认聚焦「取消」，避免误触退出/关机
-    final result = await showDialog<int?>(
+    final result = await showDialog<String?>(
       context: context,
       builder: (dialogCtx) {
         // 遥控器友好：AlertDialog 用 StatefulBuilder 包裹，按钮高亮
@@ -887,20 +908,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             _exitDialogRefresh = setDialogState;
             // 自绘退出面板：不显示程序图标，内容全部居中，
             // 紧凑布局（短小精悍）：程序名称/版本两行 +
-            // 「返回/退出/关机」三个方块图标按钮（无文字，
+            // 「返回/退出/设置/锁定/听电视/关机」方块图标按钮（无文字，
             // 鼠标悬停或遥控器框选时在方块下方显示对应文字）。
             // 安卓电视逻辑分辨率较小（常见 960x540），按屏宽等比缩小面板
+            // 按钮从 3 个增到 5~6 个后整体更宽，下限抬到 0.72，
+            // 否则手机上的方块会被 FittedBox 缩得太小不好点
             final double panelScale =
-                (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.55, 1.0);
-            final options = <_ExitOption>[
-              const _ExitOption(
-                  Icons.arrow_back, '返回', Colors.blueAccent),
-              const _ExitOption(Icons.logout, '退出', Colors.redAccent),
-              // 关闭系统仅 Windows/Linux 原生显示
-              if (_canShutdownSystem)
-                const _ExitOption(
-                    Icons.power_settings_new, '关机', Colors.orangeAccent),
-            ];
+                (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.72, 1.0);
+            // 返回/退出固定在前，其后是移动端底部面板精简下来的
+            // 设置/锁定/听电视（沿用退出面板的方块风格），关机仅桌面
+            final options = _buildExitOptions(c);
+            // 选项随状态增减（听电视/锁定），焦点下标不能越界
+            if (_exitDialogFocusIndex >= options.length) {
+              _exitDialogFocusIndex = options.length - 1;
+            }
             return Dialog(
               backgroundColor: const Color(0xFF12151A),
               shape: RoundedRectangleBorder(
@@ -961,26 +982,38 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     );
     _exitDialogOpen = false;
     _exitDialogRefresh = null;
-    if (!mounted) return;
-    if (result == 1) {
-      // SystemNavigator.pop() 只在 Android/iOS 有效，桌面端需要用 windowManager
-      if (!kIsWeb &&
-          (defaultTargetPlatform == TargetPlatform.windows ||
-              defaultTargetPlatform == TargetPlatform.linux ||
-              defaultTargetPlatform == TargetPlatform.macOS)) {
-        await windowManager.close();
-      } else {
-        await SystemNavigator.pop();
-      }
-    } else if (result == 2) {
-      final isWindows =
-          !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
-      _showOsd(
-        isWindows ? '5 秒后将关闭系统，可运行 shutdown /a 取消' : '即将关闭系统…',
-        icon: Icons.power_settings_new,
-        duration: const Duration(seconds: 5),
-      );
-      await shutdownSystem();
+    if (!mounted || result == null) return;
+    switch (result) {
+      case 'exit':
+        // SystemNavigator.pop() 只在 Android/iOS 有效，桌面端需要用 windowManager
+        if (!kIsWeb &&
+            (defaultTargetPlatform == TargetPlatform.windows ||
+                defaultTargetPlatform == TargetPlatform.linux ||
+                defaultTargetPlatform == TargetPlatform.macOS)) {
+          await windowManager.close();
+        } else {
+          await SystemNavigator.pop();
+        }
+        break;
+      case 'settings':
+        _toggleSettings();
+        break;
+      case 'lock':
+        c.toggleLock();
+        break;
+      case 'listen':
+        c.toggleListenMode();
+        break;
+      case 'shutdown':
+        final isWindows =
+            !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+        _showOsd(
+          isWindows ? '5 秒后将关闭系统，可运行 shutdown /a 取消' : '即将关闭系统…',
+          icon: Icons.power_settings_new,
+          duration: const Duration(seconds: 5),
+        );
+        await shutdownSystem();
+        break;
     }
   }
 
@@ -990,8 +1023,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       (defaultTargetPlatform == TargetPlatform.windows ||
           defaultTargetPlatform == TargetPlatform.linux);
 
-  /// 退出框按钮数（2 或 3）
-  int get _exitOptionCount => _canShutdownSystem ? 3 : 2;
+  /// 退出框的按钮列表（顺序即遥控器 ←/→ 的移动顺序）。
+  /// 移动端底部面板按钮太多会挤压节目名，因此把「设置/锁定/听电视」
+  /// 收进这里，与返回/退出同一套方块风格。
+  List<_ExitOption> _buildExitOptions(PlayerController c) => <_ExitOption>[
+        const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
+        const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
+        const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
+        if (!c.locked)
+          const _ExitOption(
+              Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
+        if (c.currentChannel != null)
+          _ExitOption(Icons.headphones, c.listenMode ? '退出听电视' : '听电视',
+              Colors.purpleAccent, 'listen'),
+        if (_canShutdownSystem)
+          const _ExitOption(Icons.power_settings_new, '关机', Colors.orangeAccent,
+              'shutdown'),
+      ];
+
+  /// 退出框按钮数（随当前状态变化：锁定/听电视/关机按需出现）
+  int get _exitOptionCount =>
+      _buildExitOptions(context.read<PlayerController>()).length;
 
   /// 构建退出框中的一个方块图标按钮（不取键盘焦点，高亮由全局按键维护）。
   /// 方块仅显示图标；鼠标悬停或遥控器框选时，方块下方显示文字标签。
@@ -1012,7 +1064,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 一次性守卫：先摘标志再 pop，鼠标点击与遥控器 OK 都不会双 pop
         onTap: () {
           _exitDialogOpen = false;
-          Navigator.of(ctx).pop<int?>(index == 0 ? null : index);
+          Navigator.of(ctx)
+              .pop<String?>(opt.action == 'back' ? null : opt.action);
         },
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1139,9 +1192,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (isOk) {
       if (isDown && _exitDialogOpen) {
         // 先置标志位，防止同一按键事件被路由双处理（全局 handler + 按钮 Focus）
-        final idx = _exitDialogFocusIndex;
+        final opts = _buildExitOptions(context.read<PlayerController>());
+        final idx = _exitDialogFocusIndex.clamp(0, opts.length - 1);
+        final action = opts[idx].action;
         _exitDialogOpen = false;
-        Navigator.of(context).pop<int?>(idx == 0 ? null : idx);
+        Navigator.of(context)
+            .pop<String?>(action == 'back' ? null : action);
       }
       return true;
     }
@@ -1165,14 +1221,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (k == LogicalKeyboardKey.contextMenu) {
       if (isDown && _exitDialogOpen) {
         _exitDialogOpen = false;
-        Navigator.of(context).pop<int?>(null);
+        Navigator.of(context).pop<String?>(null);
       }
       return true;
     }
     if (k == LogicalKeyboardKey.escape) {
       if (isDown && _exitDialogOpen) {
         _exitDialogOpen = false;
-        Navigator.of(context).pop<int?>(null);
+        Navigator.of(context).pop<String?>(null);
       }
       return true;
     }
@@ -1697,9 +1753,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   void _openDrawer({required bool left}) {
     if (context.read<PlayerController>().locked) return;
+    _bottomHideTimer?.cancel();
     setState(() {
       // 打开面板时隐藏悬停标题栏，避免遮挡面板顶部按钮
       _topBarVisible = false;
+      // 抽屉与底部信息面板互斥：抽屉会盖住面板右侧按钮
+      // （EPG 盖住设置/清晰度，频道面板盖住台标/节目信息）
+      _bottomPanelVisible = false;
       if (left) {
         _leftDrawerOpen = true;
         _rightEpgOpen = false;
@@ -1714,8 +1774,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 快捷键用：再次按键时关闭对应面板
   void _toggleDrawer({required bool left}) {
     if (context.read<PlayerController>().locked) return;
+    _bottomHideTimer?.cancel();
     setState(() {
       _topBarVisible = false;
+      // 与 _openDrawer 一致：抽屉展开时不保留底部面板，避免互相遮挡
+      _bottomPanelVisible = false;
       if (left) {
         if (_leftDrawerOpen) {
           _leftDrawerOpen = false;
@@ -1952,6 +2015,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return;
     }
     if (c.locked) return;
+    // 抽屉展开时，中间的点击先用来关闭抽屉（点空白处收起），
+    // 避免底部面板与抽屉同时出现互相遮挡
+    if (_leftDrawerOpen || _rightEpgOpen) {
+      setState(() {
+        _leftDrawerOpen = false;
+        _rightEpgOpen = false;
+      });
+      _ensureShortcutFocus();
+      return;
+    }
     setState(() {
       _bottomPanelVisible = !_bottomPanelVisible;
       if (_bottomPanelVisible) {
@@ -2087,14 +2160,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         } else if (action == 'ok') {
           // 一次性守卫：先摘标志再 pop，任何重复/残余事件都不会
           // 再弹一次（第二次 pop 会把播放器路由弹掉 → 黑屏）
-          final idx = _exitDialogFocusIndex;
+          final opts = _buildExitOptions(context.read<PlayerController>());
+          final idx = _exitDialogFocusIndex.clamp(0, opts.length - 1);
+          final picked = opts[idx].action;
           _exitDialogOpen = false;
-          Navigator.of(context).pop<int?>(idx == 0 ? null : idx);
+          Navigator.of(context)
+              .pop<String?>(picked == 'back' ? null : picked);
         } else if (action == 'back' ||
             action == 'esc' ||
             action == 'menu') {
           _exitDialogOpen = false;
-          Navigator.of(context).pop<int?>(null);
+          Navigator.of(context).pop<String?>(null);
         }
         return;
       }
@@ -2229,6 +2305,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 桌面端 hover 到底部边缘时显示面板
   void _showBottomPanel() {
     if (context.read<PlayerController>().locked) return;
+    // 抽屉打开时不弹底部面板：两者重叠会互相遮挡
+    if (_leftDrawerOpen || _rightEpgOpen) return;
     setState(() => _bottomPanelVisible = true);
     _bottomHideTimer?.cancel();
   }
@@ -2247,22 +2325,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     });
   }
 
-  /// 视频画面区域：常规铺满全屏；移动端小窗时缩为右下角浮层。
+  /// 视频画面区域：常规铺满全屏；移动端小窗时缩为右侧居中浮层。
   /// 桌面端小窗由 window_manager 直接缩小真实窗口，无需改布局。
   Widget _videoArea(PlayerController c, Widget child) {
     final mini = c.miniWindow && !c.isDesktop;
     if (!mini) return Positioned.fill(child: child);
-    final screenW = MediaQuery.of(context).size.width;
-    final boxW = screenW < 700 ? screenW * 0.52 : 420.0;
+    // 移动端小窗：参考效果图——画面缩到屏幕宽 46%、贴右侧（右边距 9%）、
+    // 垂直居中，直角无圆角，其余区域保持黑底，不再用右下角小圆角浮窗
+    final size = MediaQuery.of(context).size;
+    final boxW = size.width * 0.46;
+    final boxH = boxW * 9 / 16;
     return Positioned(
-      right: 12,
-      bottom: 12,
+      right: size.width * 0.09,
+      top: (size.height - boxH) / 2,
       width: boxW,
-      height: boxW * 9 / 16,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: child,
-      ),
+      height: boxH,
+      child: child,
     );
   }
 }
@@ -5432,7 +5510,11 @@ class _ExitOption {
   final IconData icon;
   final String label;
   final Color color;
-  const _ExitOption(this.icon, this.label, this.color);
+
+  /// 动作标识（back/exit/settings/lock/listen/shutdown），
+  /// 弹窗返回值用它而不是下标，选项增减时不会错位
+  final String action;
+  const _ExitOption(this.icon, this.label, this.color, this.action);
 }
 
 /// 网页嗅探到的媒体流候选（XHR/fetch 命中聚合）

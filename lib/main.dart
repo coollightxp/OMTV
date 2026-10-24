@@ -31,9 +31,10 @@ void main() async {
   var prefsOk = false;
   try {
     final prefs = await SharedPreferences.getInstance();
-    bufferSeconds = prefs.getInt('settings_buffer_seconds') ?? 5;
-    launchAtStartup = prefs.getBool('settings_launch_at_startup') ?? false;
-    alwaysOnTop = prefs.getBool('settings_always_on_top') ?? true;
+    // 键名与 PlayerController 保持一致（omtv_ 前缀，与旧 omplayer 隔离）
+    bufferSeconds = prefs.getInt('omtv_settings_buffer_seconds') ?? 5;
+    launchAtStartup = prefs.getBool('omtv_settings_launch_at_startup') ?? false;
+    alwaysOnTop = prefs.getBool('omtv_settings_always_on_top') ?? true;
     prefsOk = true;
   } catch (e) {
     debugPrint('SharedPreferences load failed, using defaults: $e');

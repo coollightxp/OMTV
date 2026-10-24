@@ -295,7 +295,7 @@ class PlayerController extends ChangeNotifier {
         await playChannel(_currentChannel!);
       } else {
         // 启动时无网，playChannel 在等网阶段返回、频道从未赋值：
-        // 重新恢复上次播放的频道（无记录时回到空闲态）
+        // 重新恢复上次播放的频道（无记录时默认播第一个频道）
         _state = PlayerState.idle;
         await restoreLastChannel();
       }
@@ -320,7 +320,10 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== 上次播放记忆 ====================
 
-  static const _kLastChannel = 'last_channel_v1';
+  // OMTV 独立项目：所有偏好键都加 omtv_ 前缀，与旧 omplayer 的存储隔离。
+  // 否则沿用旧键会把 omplayer 记录的「上次频道」（如 CCTV-6）带过来，
+  // 表现为新装的 OMTV 一启动就自动播某个旧频道
+  static const _kLastChannel = 'omtv_last_channel_v1';
 
   /// 播放成功后记录当前频道，供下次启动恢复
   Future<void> _saveLastChannel({Channel? channel}) async {
@@ -353,7 +356,16 @@ class PlayerController extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       final str = p.getString(_kLastChannel);
-      if (str == null || str.isEmpty) return;
+      if (str == null || str.isEmpty) {
+        // 首次启动（或刚从旧 omplayer 迁移过来、键已隔离）：默认播第一个频道，
+        // 而不是留在黑屏等用户选台
+        final first = _categories.isNotEmpty &&
+                _categories.first.channels.isNotEmpty
+            ? _categories.first.channels.first
+            : null;
+        if (first != null) await playChannel(first);
+        return;
+      }
       final Map<String, dynamic> data =
           jsonDecode(str) as Map<String, dynamic>;
       final urls = (data['streamUrls'] as List<dynamic>?)
@@ -422,13 +434,13 @@ class PlayerController extends ChangeNotifier {
     }
     try {
       final prefs = await SharedPreferences.getInstance();
-      var uuid = prefs.getString('dlna_uuid') ?? '';
+      var uuid = prefs.getString('omtv_dlna_uuid') ?? '';
       if (uuid.isEmpty) {
         final rnd = Random();
         uuid = List.generate(
                 8, (_) => '0123456789abcdef'[rnd.nextInt(16)])
             .join();
-        await prefs.setString('dlna_uuid', uuid);
+        await prefs.setString('omtv_dlna_uuid', uuid);
       }
       await dlnaService.start(
         uuid: uuid,
@@ -1683,23 +1695,25 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== 设置持久化 ====================
 
-  static const _kAutoPlayNext = 'settings_auto_play_next';
-  static const _kSensitivity = 'settings_sensitivity';
-  static const _kAutoHide = 'settings_auto_hide';
-  static const _kLaunchAtStartup = 'settings_launch_at_startup';
-  static const _kStartFullscreen = 'settings_start_fullscreen';
-  static const _kShowClock = 'settings_show_clock';
-  static const _kAlwaysOnTop = 'settings_always_on_top';
-  static const _kDlnaEnabled = 'settings_dlna_enabled';
-  static const _kDefaultVolume = 'settings_default_volume';
-  static const _kDefaultBrightness = 'settings_default_brightness';
-  static const _kBufferSeconds = 'settings_buffer_seconds';
-  static const _kUiScale = 'settings_ui_scale';
-  static const _kUiScaleAuto = 'settings_ui_scale_auto';
-  static const _kResolution = 'settings_resolution';
-  static const _kListenHideWindow = 'settings_listen_hide_window';
-  static const _kListenShowCard = 'settings_listen_show_card';
-  static const _kFavoriteChannelIds = 'omplayer_favorite_channel_ids';
+  // 偏好键统一 omtv_ 前缀：与旧 omplayer 共用同一份 SharedPreferences 时
+  // 互不干扰（旧值不会被读入，改设置也不会写回旧键）
+  static const _kAutoPlayNext = 'omtv_settings_auto_play_next';
+  static const _kSensitivity = 'omtv_settings_sensitivity';
+  static const _kAutoHide = 'omtv_settings_auto_hide';
+  static const _kLaunchAtStartup = 'omtv_settings_launch_at_startup';
+  static const _kStartFullscreen = 'omtv_settings_start_fullscreen';
+  static const _kShowClock = 'omtv_settings_show_clock';
+  static const _kAlwaysOnTop = 'omtv_settings_always_on_top';
+  static const _kDlnaEnabled = 'omtv_settings_dlna_enabled';
+  static const _kDefaultVolume = 'omtv_settings_default_volume';
+  static const _kDefaultBrightness = 'omtv_settings_default_brightness';
+  static const _kBufferSeconds = 'omtv_settings_buffer_seconds';
+  static const _kUiScale = 'omtv_settings_ui_scale';
+  static const _kUiScaleAuto = 'omtv_settings_ui_scale_auto';
+  static const _kResolution = 'omtv_settings_resolution';
+  static const _kListenHideWindow = 'omtv_settings_listen_hide_window';
+  static const _kListenShowCard = 'omtv_settings_listen_show_card';
+  static const _kFavoriteChannelIds = 'omtv_favorite_channel_ids';
 
   Future<void> _loadSettings() async {
     try {

@@ -143,7 +143,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           child: ScaledPanel(
             alignment: Alignment.bottomCenter,
             scale: 1.0,
-            child: Container(
+            // 面板内空白区域也吞掉点击：移动端点面板右侧空白处时不会
+            // 穿透到屏幕点击分区（右三分之一），避免误开 EPG 盖住按钮
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {},
+              child: Container(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
@@ -199,6 +204,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           ),
         ),
       ),
+    ),
     );
   }
 
@@ -363,21 +369,26 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         c.videoRotation.value == 0 ? '旋转画面' : '恢复原始方向',
         hasChannel ? c.cycleVideoRotation : null,
       ),
-      _KbAction(
-        'listen',
-        Icons.headphones,
-        c.listenMode ? '退出听电视' : '听电视',
-        hasChannel ? c.toggleListenMode : null,
-      ),
-      _KbAction(
-        'lock',
-        c.locked ? Icons.lock : Icons.lock_open,
-        c.locked ? '已锁定' : '锁定屏幕',
-        c.locked ? null : c.toggleLock,
-        dismiss: true,
-      ),
-      _KbAction('settings', Icons.settings, '设置', widget.onOpenSettings,
-          dismiss: true),
+      // 听电视/锁定/设置：移动端底部按钮太多会把节目名挤到看不全，
+      // 这三项收进退出面板（返回键弹出）；桌面端空间充足仍保留在底部
+      if (c.isDesktop)
+        _KbAction(
+          'listen',
+          Icons.headphones,
+          c.listenMode ? '退出听电视' : '听电视',
+          hasChannel ? c.toggleListenMode : null,
+        ),
+      if (c.isDesktop)
+        _KbAction(
+          'lock',
+          c.locked ? Icons.lock : Icons.lock_open,
+          c.locked ? '已锁定' : '锁定屏幕',
+          c.locked ? null : c.toggleLock,
+          dismiss: true,
+        ),
+      if (c.isDesktop)
+        _KbAction('settings', Icons.settings, '设置', widget.onOpenSettings,
+            dismiss: true),
       _KbAction(
         'resolution',
         null,
