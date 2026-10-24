@@ -56,7 +56,15 @@ jobs:
           # IPTV 源多为 http:// 明文地址，必须允许明文流量
           sed -i 's|<application|<application android:usesCleartextTraffic="true"|' $MANIFEST
           # 单实例：从图标再次启动时回到已有任务而不是新开进程
-          sed -i 's|<activity |<activity android:launchMode="singleTask" |' $MANIFEST
+          # 模板自带 singleTop，必须替换成 singleTask（新增会变成重复属性、Manifest 直接非法）
+          if ! grep -q 'android:launchMode="singleTask"' $MANIFEST; then
+            if grep -q 'android:launchMode="singleTop"' $MANIFEST; then
+              sed -i 's|android:launchMode="singleTop"|android:launchMode="singleTask"|' $MANIFEST
+            else
+              sed -i 's|android:name=".MainActivity"|android:name=".MainActivity"\n            android:launchMode="singleTask"|' $MANIFEST
+            fi
+          fi
+          grep -q 'android:launchMode="singleTask"' $MANIFEST || { echo "::error::singleTask 未写入 AndroidManifest"; exit 1; }
           # 显式声明网络权限（video_player 会合并，但显式更稳）
           grep -q "android.permission.INTERNET" $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' $MANIFEST
           # TV 盒子可装可用：不强制触摸屏；声明 leanback 非必需（Android TV
@@ -83,14 +91,15 @@ jobs:
       - name: Patch Android PiP / audio notification service
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          # 上一步已经把 launchMode 写进 <activity>，这里以它为锚点追加 PiP 属性
-          # （否则 <activity 后已不是空格，直接匹配会落空）
-          sed -i 's|android:launchMode="singleTask"|android:launchMode="singleTask" android:supportsPictureInPicture="true" android:resizeableActivity="true"|' $MANIFEST
-          grep -q 'supportsPictureInPicture' $MANIFEST || echo "::warning::PiP 属性未写入 AndroidManifest"
-          # 听电视：媒体播放前台服务权限 + 通知权限 + 服务声明
+          # 同样锚在 .MainActivity 行追加 PiP 属性（不依赖上一步是否匹配到）
+          grep -q 'supportsPictureInPicture' $MANIFEST || sed -i 's|android:name=".MainActivity"|android:name=".MainActivity"\n            android:supportsPictureInPicture="true"\n            android:resizeableActivity="true"|' $MANIFEST
+          grep -q 'supportsPictureInPicture' $MANIFEST || { echo "::error::PiP 属性未写入 AndroidManifest"; exit 1; }
+          # 听电视：Android 14 起媒体播放前台服务必须声明类型与对应权限
           grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
+          grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || { echo "::error::前台服务权限未写入 AndroidManifest"; exit 1; }
           grep -q 'AudioPlaybackService' $MANIFEST || sed -i 's|</application>|    <service android:name=".AudioPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
-          grep -q 'AudioPlaybackService' $MANIFEST || echo "::warning::音频前台服务未写入 AndroidManifest"
+          grep -q 'AudioPlaybackService' $MANIFEST || { echo "::error::音频前台服务未写入 AndroidManifest"; exit 1; }
+          grep -q 'foregroundServiceType="mediaPlayback"' $MANIFEST || { echo "::error::前台服务缺少 mediaPlayback 类型"; exit 1; }
           KS_DIR=android/app/src/main/kotlin/com/example/omplayer
           mkdir -p $KS_DIR
           cat > $KS_DIR/AudioPlaybackService.kt <<'KOTLIN'
