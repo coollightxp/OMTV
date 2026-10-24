@@ -1017,6 +1017,12 @@ class PlayerController extends ChangeNotifier {
     if (_webPageActive && _currentChannel?.id == channel.id) {
       return;
     }
+    // 网页频道切台（含安卓通知卡片的上一台/下一台）：旧台必须立刻停止。
+    // 应用退到后台时 Flutter 不产帧，WebView 控件不会重建，只改状态的话
+    // 旧频道会一直播到用户回到前台为止。这里先在仍存活的 WebView 里用
+    // JS 导航到新频道，旧频道立即停播、新频道立即开始载入。
+    // 前台时不走这一步：正常帧刷新会立刻重建控件，旧台同样马上停止。
+    if (_webPageActive && _isAppBackgrounded()) _switchWebInPlace(channel);
     _resetWebRecording();
     await _disposeVideoController();
     _currentChannel = channel;
@@ -1033,6 +1039,57 @@ class PlayerController extends ChangeNotifier {
     } else {
       await launchExternal(channel.webPageUrl);
     }
+  }
+
+  /// 应用是否处于后台（退到后台/隐藏窗口后 Flutter 不产帧）
+  bool _isAppBackgrounded() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state != null && state != AppLifecycleState.resumed;
+  }
+
+  /// 在仍存活的 WebView 里立即切到新网页频道（不等 Flutter 重建控件）。
+  /// 先暂停旧页面的 video（声音立刻停住），再整页导航到新频道地址，
+  /// 新频道马上开始载入。
+  void _switchWebInPlace(Channel channel) {
+    final eval = _webEval;
+    if (eval == null) return;
+    final newUrl = channel.webPageUrl;
+    // 先暂停页面里所有 video：即使站点点台脚本要花几秒找频道节点，
+    // 旧频道的声音也立刻停住，不会出现"切了台还在放旧的"
+    const stopOld = "try{var vs=document.querySelectorAll('video');"
+        "for(var i=0;i<vs.length;i++){try{vs[i].pause();}catch(e){}}}catch(e){}";
+    final js = "(function(){$stopOld"
+        "location.href=${jsonEncode(newUrl)};return '0';})()";
+    eval(js).catchError((_) => null);
+    // 旧页面被导航走：立即复位前景/播放态，信息面板与通知卡片同步刷新
+    _webPageForeground = false;
+    _webPlaying = false;
+  }
+
+  /// 重载当前频道（底部面板「重载」按钮）：卡死/黑屏时手动重新载入。
+  /// 网页频道重新载入页面（站点脚本随后会按当前频道名重新点台），
+  /// 流频道直接从第一个源重播。
+  Future<void> reloadCurrentChannel() async {
+    final channel = _currentChannel;
+    if (channel == null) return;
+    OsdBus.show('正在重载「${channel.name}」', icon: Icons.refresh);
+    if (_webPageActive) {
+      _webPageForeground = false;
+      _webPlaying = false;
+      notifyListeners();
+      final wc = webController;
+      if (wc != null) {
+        try {
+          await wc.reload();
+        } catch (_) {
+          final eval = _webEval;
+          if (eval != null) eval('location.reload()').catchError((_) => null);
+        }
+        return;
+      }
+    }
+    _sourceIndex = 0;
+    await playChannel(channel);
   }
 
   /// 退出网页频道内嵌模式（隐藏网页控件，回到普通播放界面）
@@ -1888,6 +1945,7 @@ class PlayerController extends ChangeNotifier {
   static const _kResolution = 'omtv_settings_resolution';
   static const _kListenHideWindow = 'omtv_settings_listen_hide_window';
   static const _kListenShowCard = 'omtv_settings_listen_show_card';
+  static const _kAutoReloadStall = 'omtv_settings_auto_reload_stall';
   static const _kFavoriteChannelIds = 'omtv_favorite_channel_ids';
 
   Future<void> _loadSettings() async {
@@ -1910,6 +1968,7 @@ class PlayerController extends ChangeNotifier {
         uiScaleAuto: p.getBool(_kUiScaleAuto) ?? true,
         listenModeHideWindow: p.getBool(_kListenHideWindow) ?? true,
         listenModeShowCard: p.getBool(_kListenShowCard) ?? true,
+        autoReloadStall: p.getBool(_kAutoReloadStall) ?? true,
       );
       _resolution = p.getString(_kResolution) ?? '1080P';
       _favoriteChannelIds
@@ -1938,6 +1997,7 @@ class PlayerController extends ChangeNotifier {
       await p.setBool(_kUiScaleAuto, _settings.uiScaleAuto);
       await p.setBool(_kListenHideWindow, _settings.listenModeHideWindow);
       await p.setBool(_kListenShowCard, _settings.listenModeShowCard);
+      await p.setBool(_kAutoReloadStall, _settings.autoReloadStall);
     } catch (_) {}
   }
 

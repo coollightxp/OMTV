@@ -45,6 +45,9 @@ class PlayerSettings {
   /// 听电视时显示信息栏卡片（Android 手机/平板）
   final bool listenModeShowCard;
 
+  /// 播放卡死时自动重载当前频道（网页长时间无进展时触发）
+  final bool autoReloadStall;
+
   const PlayerSettings({
     this.autoPlayNext = true,
     this.defaultVolume = 0.8,
@@ -61,6 +64,7 @@ class PlayerSettings {
     this.uiScaleAuto = true,
     this.listenModeHideWindow = true,
     this.listenModeShowCard = true,
+    this.autoReloadStall = true,
   });
 
   PlayerSettings copyWith({
@@ -79,6 +83,7 @@ class PlayerSettings {
     bool? uiScaleAuto,
     bool? listenModeHideWindow,
     bool? listenModeShowCard,
+    bool? autoReloadStall,
   }) {
     return PlayerSettings(
       autoPlayNext: autoPlayNext ?? this.autoPlayNext,
@@ -96,6 +101,7 @@ class PlayerSettings {
       uiScaleAuto: uiScaleAuto ?? this.uiScaleAuto,
       listenModeHideWindow: listenModeHideWindow ?? this.listenModeHideWindow,
       listenModeShowCard: listenModeShowCard ?? this.listenModeShowCard,
+      autoReloadStall: autoReloadStall ?? this.autoReloadStall,
     );
   }
 }

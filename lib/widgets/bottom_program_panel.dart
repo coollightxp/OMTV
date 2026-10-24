@@ -8,8 +8,8 @@ import 'scaled_panel.dart';
 
 /// 底部信息/控制面板
 /// 布局：台标 | 当前节目(大字)+时段/频道/分辨率 | 控制按钮
-/// 按钮顺序固定：播放/暂停、全屏/小窗（电视端不显示）、静音/恢复、旋转、
-/// 截图/录像(桌面)、分辨率
+/// 按钮顺序固定：播放/暂停、重载、全屏/小窗（电视端不显示）、静音/恢复、
+/// 旋转、截图/录像(桌面)、分辨率
 /// （听电视/锁定/设置与安卓一致，统一放在返回键弹出的退出面板里）
 ///
 /// 遥控器导航（TV 盒子无鼠标）：面板可见时，←/→ 在可用按钮间移动高亮，
@@ -24,6 +24,9 @@ class BottomProgramPanel extends StatefulWidget {
 
   /// 全屏 ↔ 小窗（桌面全屏切换 / 移动端小窗播放）
   final VoidCallback onToggleFullMini;
+
+  /// 重载当前频道（卡死/黑屏时手动重新载入）
+  final VoidCallback onReload;
 
   /// 截图 / 录像（仅桌面端提供按钮）
   final VoidCallback onScreenshot;
@@ -41,6 +44,7 @@ class BottomProgramPanel extends StatefulWidget {
     required this.onOpenEpg,
     required this.onOpenSettings,
     required this.onToggleFullMini,
+    required this.onReload,
     required this.onScreenshot,
     required this.onToggleRecord,
     this.onDismissRemote,
@@ -349,6 +353,13 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         c.isPlaying ? Icons.pause : Icons.play_arrow,
         c.isPlaying ? '暂停' : '播放',
         hasChannel ? c.togglePlayPause : null,
+      ),
+      // 卡死/黑屏时手动重新载入当前电视台（网页频道刷新页面、流频道重播）
+      _KbAction(
+        'reload',
+        Icons.refresh,
+        '重载当前频道',
+        hasChannel ? widget.onReload : null,
       ),
       // 电视端没有窗口概念：画中画/小窗没有意义，直接不提供该按钮
       if (!c.isTv)

@@ -675,6 +675,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         controller.toggleMiniWindow();
                       }
                     },
+                    onReload: () => controller.reloadCurrentChannel(),
                     onScreenshot: _takeScreenshot,
                     onToggleRecord: () => _toggleRecording(controller),
                     onDismissRemote: () {
@@ -2544,9 +2545,10 @@ class _BootSplash extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // logo 宽度按屏宽缩放并限幅；标题用 Flutter Text 渲染（矢量、任意
-    // 分辨率都清晰），不再依赖位图里的文字
-    final logoW = (MediaQuery.sizeOf(context).width * 0.22).clamp(150.0, 460.0);
-    final titleSize = (logoW * 0.12).clamp(22.0, 54.0);
+    // 分辨率都清晰），不再依赖位图里的文字。图形收小、文字放大，
+    // 让「图形 + 欧米电视」整体视觉重心平衡
+    final logoW = (MediaQuery.sizeOf(context).width * 0.15).clamp(110.0, 300.0);
+    final titleSize = (logoW * 0.26).clamp(22.0, 72.0);
     return Positioned.fill(
       child: ColoredBox(
         color: Colors.black,
@@ -2564,10 +2566,10 @@ class _BootSplash extends StatelessWidget {
                       errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                     ),
                   ),
-                  SizedBox(height: logoW * 0.06),
+                  SizedBox(height: logoW * 0.10),
                   Padding(
                     // 抵消末字字距造成的视觉左偏
-                    padding: EdgeInsets.only(left: titleSize * 0.18),
+                    padding: EdgeInsets.only(left: titleSize * 0.14),
                     child: Text(
                       '欧米电视',
                       textAlign: TextAlign.center,
@@ -2575,7 +2577,7 @@ class _BootSplash extends StatelessWidget {
                         color: Colors.white,
                         fontSize: titleSize,
                         fontWeight: FontWeight.w700,
-                        letterSpacing: titleSize * 0.18,
+                        letterSpacing: titleSize * 0.14,
                         height: 1.12,
                       ),
                     ),
@@ -3011,6 +3013,16 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 
   /// 后台缓冲期间每秒探测一次页面 <video> 的真实起播状态
   Timer? _probeTimer;
+
+  /// 自动重载看门狗：前台播放时每 3 秒采样主视频播放位置，
+  /// 连续 8 次（24 秒）没有推进且不是用户暂停 → 判定卡死并自动重载。
+  /// 设置里「卡死自动重载」可关闭；每个频道最多重载 3 次、每次冷却 40 秒。
+  Timer? _stallTimer;
+  double _lastVideoCt = -1;
+  int _stallTicks = 0;
+  int _autoReloadCount = 0;
+  bool _stallBusy = false;
+  DateTime _stallCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// 超时兜底：网站不允许自动播放（需用户手动点播放按钮）时，
   /// 不能永远黑屏把用户卡死——8 秒后若网页自身也没起播，
@@ -5411,6 +5423,9 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 层。InPrivate 模式下数据本就不持久，整目录清理只在启动/退出做
     // 后台缓冲期间持续探测；正常页起播后不立即推前台，等嗅探决策
     _probeTimer = Timer.periodic(const Duration(seconds: 1), (_) => _probe());
+    // 卡死看门狗（前台播放态才工作；设置里可关闭）
+    _stallTimer =
+        Timer.periodic(const Duration(seconds: 3), (_) => _checkStall());
     // 站点页提前注入：站点脚本（芒果/央视频）原来只在 onLoadStop 注入，
     // 而慢站首屏 load_stop 迟迟不来（8 秒时进度仍 66%）导致脚本永不注入、
     // 永不点台、页面永不挂 video。2.5 秒先注入一次，脚本自带点台重试轮询；
@@ -5483,6 +5498,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     WebDiag.end();
     widget.onBridgeDetached();
     _probeTimer?.cancel();
+    _stallTimer?.cancel();
     _siteInjectTimer?.cancel();
     _forceForegroundTimer?.cancel();
     _decisionTimer?.cancel();
@@ -5504,11 +5520,28 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     return null;
   }
 
+  /// 当前应加载/点台的网页地址与频道名。
+  /// 后台切台时控制器已把频道切走、WebView 却来不及重建，widget 上还是
+  /// 旧地址/旧标题；站点脚本若拿旧值点台会把新页面点回旧频道，因此这里
+  /// 统一以控制器当前频道为准（前台正常切台时两者一致，行为不变）。
+  String get _activeUrl {
+    if (!mounted) return widget.url;
+    final ch = context.read<PlayerController>().currentChannel;
+    final u = ch?.webPageUrl ?? '';
+    return u.isNotEmpty ? u : widget.url;
+  }
+
+  String get _activeTitle {
+    if (!mounted) return widget.title;
+    return context.read<PlayerController>().currentChannel?.name ??
+        widget.title;
+  }
+
   /// 调页面内 __omSiteGo(url, 频道名)：芒果TV/央视频同 URL 页内切台，
   /// 未注入站点脚本的页面 __omSiteGo 不存在，短路与直接跳过
   String _siteGoCall() =>
       'window.__omSiteGo && window.__omSiteGo('
-      '${jsonEncode(widget.url)}, ${jsonEncode(widget.title)})';
+      '${jsonEncode(_activeUrl)}, ${jsonEncode(_activeTitle)})';
 
   Future<void> _inject() async {
     final c = _webController;
@@ -5519,11 +5552,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       await c.evaluateJavascript(source: _bootJs);
       // 站点脚本在 _bootJs 之后注入：置 __omSkipPin 让通用铺满让位，
       // 并清掉 _bootJs 可能已抢先铺满的元素；随后立刻按当前频道点台
-      final siteJs = _siteJsFor(widget.url);
+      final siteJs = _siteJsFor(_activeUrl);
       if (siteJs != null) {
         await c.evaluateJavascript(source: siteJs);
         await c.evaluateJavascript(source: _siteGoCall());
-        WebDiag.log('sitego', 'via=inject|title=${widget.title}');
+        WebDiag.log('sitego', 'via=inject|title=$_activeTitle');
       }
       // 嗅探脚本只在兜底重载后注入；默认页面保持零 hook 纯净环境
       if (_sniffEnabled) await c.evaluateJavascript(source: _sniffJs);
@@ -5584,6 +5617,119 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
         }
       }
     } catch (_) {}
+  }
+
+  /// 卡死看门狗读取页面主视频：[有元素, 是否暂停, 当前播放位置]。
+  /// 优先取面积最大的视频（听电视/音频档把它隐藏成 0 尺寸时，
+  /// 退化为取第一个未暂停的元素），iframe 内也一起统计。
+  static const String _healthJs = r'''
+(function(){
+  function collect(root, out){
+    try{
+      var l = root.querySelectorAll('video,audio');
+      for (var i=0;i<l.length;i++) out.push(l[i]);
+    }catch(e){}
+    try{
+      var fs = root.querySelectorAll('iframe');
+      for (var i=0;i<fs.length;i++){
+        try{ var d = fs[i].contentDocument; if (d) collect(d, out); }catch(e){}
+      }
+    }catch(e){}
+  }
+  var vs = [];
+  collect(document, vs);
+  if (!vs.length) return [0, 0, 0];
+  var best = null, bestA = 0;
+  for (var i=0;i<vs.length;i++){
+    var r;
+    try{ r = vs[i].getBoundingClientRect(); }catch(e){ continue; }
+    var a = (r.width >= 80 && r.height >= 60) ? r.width * r.height : 0;
+    if (a > bestA) { bestA = a; best = vs[i]; }
+  }
+  if (!best) {
+    for (var i=0;i<vs.length;i++){
+      if (!vs[i].paused) { best = vs[i]; break; }
+    }
+    if (!best) best = vs[0];
+  }
+  var ct = 0;
+  try{ ct = best.currentTime || 0; }catch(e){}
+  return [1, best.paused ? 1 : 0, ct];
+})();
+''';
+
+  /// 自动重载看门狗：前台播放时每 3 秒采样一次主视频播放位置，
+  /// 连续 8 次（24 秒）没有推进且不是用户暂停 → 判定卡死并自动
+  /// 重载当前频道。设置「卡死自动重载」可关闭；每频道最多 3 次。
+  Future<void> _checkStall() async {
+    if (!mounted || _stallBusy) return;
+    PlayerController ctl;
+    try {
+      ctl = context.read<PlayerController>();
+    } catch (_) {
+      return;
+    }
+    if (!ctl.settings.autoReloadStall) return;
+    // 还在缓冲/决策窗口不算卡死；用户自己暂停也不算
+    if (!widget.foreground) {
+      _stallTicks = 0;
+      _lastVideoCt = -1;
+      return;
+    }
+    if (DateTime.now().isBefore(_stallCooldownUntil)) return;
+    if (_autoReloadCount >= 3) return;
+    final c = _webController;
+    if (c == null) return;
+    _stallBusy = true;
+    try {
+      dynamic r;
+      var stalled = false;
+      try {
+        r = await c
+            .evaluateJavascript(source: _healthJs)
+            .timeout(const Duration(seconds: 4));
+      } on TimeoutException {
+        // 页面主线程完全无响应（连注入 JS 都执行不了）：同样按无进展计拍
+        stalled = true;
+      } catch (_) {
+        return;
+      }
+      if (!mounted) return;
+      if (!stalled) {
+        if (r is! List || r.length < 3) return;
+        bool flag(dynamic v) => v == 1 || v?.toString() == '1';
+        if (!flag(r[0]) || flag(r[1])) {
+          // 页面没有视频元素 / 视频处于暂停：都不算卡死
+          _stallTicks = 0;
+          _lastVideoCt = -1;
+          return;
+        }
+        final ct = double.tryParse(r[2]?.toString() ?? '') ?? -1;
+        if (ct < 0) {
+          _stallTicks = 0;
+          return;
+        }
+        final last = _lastVideoCt;
+        _lastVideoCt = ct;
+        if (last < 0) return; // 首次采样只记基准
+        if ((ct - last).abs() > 0.3) {
+          _stallTicks = 0; // 播放位置在推进：正常
+          return;
+        }
+      }
+      if (++_stallTicks < 8) return;
+      // 24 秒没有任何推进：判定卡死，自动重载当前频道
+      _stallTicks = 0;
+      _lastVideoCt = -1;
+      _autoReloadCount++;
+      _stallCooldownUntil = DateTime.now().add(const Duration(seconds: 40));
+      WebDiag.log('auto_reload', 'n=$_autoReloadCount|title=$_activeTitle');
+      try {
+        await ctl.reloadCurrentChannel();
+      } catch (_) {}
+    } finally {
+      _stallBusy = false;
+    }
   }
 
   /// 站点页（芒果/央视频）仍无 video 元素时重新点台。

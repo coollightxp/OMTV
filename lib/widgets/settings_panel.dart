@@ -103,6 +103,15 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                   onChanged: (v) => controller.updateSettings(
                                       s.copyWith(autoPlayNext: v)),
                                 ),
+                                _switchTile(
+                                  icon: Icons.autorenew,
+                                  title: '卡死自动重载',
+                                  subtitle: '网页播放长时间无进展时自动重新载入当前频道'
+                                      '（怕误判可以关掉，底部面板仍可手动重载）',
+                                  value: s.autoReloadStall,
+                                  onChanged: (v) => controller.updateSettings(
+                                      s.copyWith(autoReloadStall: v)),
+                                ),
                                 _segmentTile<int>(
                                   icon: Icons.slow_motion_video,
                                   title: '播放缓冲',
