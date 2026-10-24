@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/player_settings.dart';
@@ -351,21 +352,13 @@ class _SettingsPanelState extends State<SettingsPanel> {
       leading: Icon(icon, color: Colors.white70, size: 22),
       title: Text(title,
           style: const TextStyle(color: Colors.white, fontSize: 15)),
-      subtitle: SliderTheme(
-        data: SliderThemeData(
-          activeTrackColor: Colors.blueAccent,
-          inactiveTrackColor: Colors.white24,
-          thumbColor: Colors.blueAccent,
-          overlayColor: Colors.blueAccent.withOpacity(0.2),
-        ),
-        child: Slider(
-          value: value.clamp(min, max),
-          min: min,
-          max: max,
-          divisions: divisions,
-          label: label,
-          onChanged: onChanged,
-        ),
+      subtitle: _KeyAdjustSlider(
+        value: value,
+        min: min,
+        max: max,
+        divisions: divisions,
+        label: label,
+        onChanged: onChanged,
       ),
     );
   }
@@ -398,26 +391,15 @@ class _SettingsPanelState extends State<SettingsPanel> {
                   color: s.uiScaleAuto ? Colors.white38 : Colors.white,
                   fontSize: 15)),
           enabled: !s.uiScaleAuto,
-          subtitle: SliderTheme(
-            data: SliderThemeData(
-              activeTrackColor: Colors.blueAccent,
-              inactiveTrackColor: Colors.white24,
-              thumbColor: Colors.blueAccent,
-              overlayColor: Colors.blueAccent.withOpacity(0.2),
-              disabledActiveTrackColor: Colors.white24,
-              disabledThumbColor: Colors.white38,
-            ),
-            child: Slider(
-              value: scale.clamp(0.8, 3.0),
-              min: 0.8,
-              max: 3.0,
-              divisions: 22,
-              label: '${scale.toStringAsFixed(1)}x',
-              onChanged: s.uiScaleAuto
-                  ? null
-                  : (v) =>
-                      controller.updateSettings(s.copyWith(uiScale: v)),
-            ),
+          subtitle: _KeyAdjustSlider(
+            value: scale,
+            min: 0.8,
+            max: 3.0,
+            divisions: 22,
+            label: '${scale.toStringAsFixed(1)}x',
+            onChanged: s.uiScaleAuto
+                ? null
+                : (v) => controller.updateSettings(s.copyWith(uiScale: v)),
           ),
         ),
       ],
@@ -497,6 +479,107 @@ class _SettingsPanelState extends State<SettingsPanel> {
                     const TextStyle(color: Colors.white60, fontSize: 13)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 遥控器可操作的滑块：左右键调节数值，上下键正常跳出行。
+/// 原生 Slider 内部有 FocusableActionDetector，聚焦后会把上下方向键吞掉，
+/// 导致遥控器停在滑块行上无法继续上下移动；这里用 ExcludeFocus 屏蔽滑块
+/// 自身的焦点，外层 Focus 只接管左右键，上下键返回 ignored 交回焦点系统。
+class _KeyAdjustSlider extends StatefulWidget {
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final String label;
+  final ValueChanged<double>? onChanged;
+
+  const _KeyAdjustSlider({
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.label,
+    required this.onChanged,
+  });
+
+  @override
+  State<_KeyAdjustSlider> createState() => _KeyAdjustSliderState();
+}
+
+class _KeyAdjustSliderState extends State<_KeyAdjustSlider> {
+  bool _focused = false;
+
+  double get _step {
+    final d = widget.divisions;
+    if (d > 0) return (widget.max - widget.min) / d;
+    return (widget.max - widget.min) / 20;
+  }
+
+  void _adjust(int dir) {
+    final cb = widget.onChanged;
+    if (cb == null) return;
+    final step = _step;
+    var v = widget.value.clamp(widget.min, widget.max) + step * dir;
+    v = v.clamp(widget.min, widget.max);
+    // 按步长对齐，避免浮点累加漂移
+    v = widget.min + ((v - widget.min) / step).roundToDouble() * step;
+    v = v.clamp(widget.min, widget.max);
+    cb(v);
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (widget.onChanged == null) return KeyEventResult.ignored;
+    final k = event.logicalKey;
+    final isLeft = k == LogicalKeyboardKey.arrowLeft;
+    final isRight = k == LogicalKeyboardKey.arrowRight;
+    if (!isLeft && !isRight) return KeyEventResult.ignored;
+    if (event is KeyUpEvent) return KeyEventResult.handled;
+    _adjust(isLeft ? -1 : 1);
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      onKeyEvent: _onKey,
+      onFocusChange: (f) {
+        if (_focused != f) setState(() => _focused = f);
+      },
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: _focused ? Colors.blueAccent : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: ExcludeFocus(
+            child: SliderTheme(
+              data: SliderThemeData(
+                activeTrackColor: Colors.blueAccent,
+                inactiveTrackColor: Colors.white24,
+                thumbColor: Colors.blueAccent,
+                overlayColor: Colors.blueAccent.withOpacity(0.2),
+                disabledActiveTrackColor: Colors.white24,
+                disabledInactiveTrackColor: Colors.white12,
+                disabledThumbColor: Colors.white38,
+              ),
+              child: Slider(
+                value: widget.value.clamp(widget.min, widget.max),
+                min: widget.min,
+                max: widget.max,
+                divisions: widget.divisions,
+                label: widget.label,
+                onChanged: widget.onChanged,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
