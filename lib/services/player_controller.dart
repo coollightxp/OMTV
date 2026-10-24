@@ -196,6 +196,8 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> _init() async {
     await _loadSettings();
+    // Android TV / 电视盒子检测：决定听电视是否允许退后台隐藏窗口
+    await _resolveIsTv();
     await reservationManager.init(_onReservationTriggered);
 
     // 画中画状态由原生回调：用户从浮窗恢复全屏后要撤掉小窗状态
@@ -956,6 +958,26 @@ class PlayerController extends ChangeNotifier {
         : 'window.__omAudio && window.__omAudio(false)');
   }
 
+  /// 等网页真正切到「音频」档并出声（网页注入脚本提供 __omAudioReady）。
+  /// 返回 true=已出声；超时返回 false（调用方仍可退后台，靠保活脚本兜底）。
+  Future<bool> _waitWebAudioReady({Duration timeout = const Duration(seconds: 4)}) async {
+    final eval = _webEval;
+    if (eval == null) return true;
+    final t0 = DateTime.now();
+    while (DateTime.now().difference(t0) < timeout) {
+      try {
+        final r = await eval('window.__omAudioReady ? window.__omAudioReady() : "1"');
+        if ((r?.toString() ?? '').contains('1')) return true;
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
+    return false;
+  }
+
+  /// 页面（重新）加载完成后再次落回音频档：换台/站点重载会重置页面脚本
+  /// 状态，听电视期间必须重新应用，否则退后台后只剩视频流甚至无声。
+  void reapplyWebAudio() => _applyWebAudio(_listenMode);
+
   /// 注销网页控制桥（WebView 销毁前）
   void detachWebBridge() {
     _webEval = null;
@@ -1674,6 +1696,25 @@ class PlayerController extends ChangeNotifier {
   bool _listenMode = false;
   bool get listenMode => _listenMode;
 
+  /// Android TV / 电视盒子：没有通知栏可操作，「听电视」必须一直停在卡片上，
+  /// 不能退后台（退后台后遥控器没有可操作的卡片，也无法再从通知栏回来）
+  bool _isTv = false;
+  bool get isTv => _isTv;
+
+  /// 懒检测电视端（启动时已检测过一次，这里兜底防止竞态）
+  Future<bool> _resolveIsTv() async {
+    if (_isTv) return true;
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      final tv = await isTvDevice();
+      if (tv != _isTv) {
+        _isTv = tv;
+        // 检测是异步的：拿到结果后刷新一次，让底部按钮/听电视条件立刻生效
+        notifyListeners();
+      }
+    }
+    return _isTv;
+  }
+
   Future<void> enterListenMode() async {
     if (_listenMode) return;
     _listenMode = true;
@@ -1682,6 +1723,8 @@ class PlayerController extends ChangeNotifier {
     // 网页频道切到官方「音频」档：音画分离流，才是真正省流量
     _applyWebAudio(true);
     _notifyListenCard(force: true);
+    // 先让界面立刻切到信息卡片，后面的切档等待/退后台在后台进行
+    notifyListeners();
     if (isDesktop && _settings.listenModeHideWindow) {
       try {
         // 只最小化，保留任务栏图标：窗口最小化后本进程不再是前台，
@@ -1689,15 +1732,28 @@ class PlayerController extends ChangeNotifier {
         // （任务栏点击/Alt+Tab 恢复后再点卡片退出听电视）
         await windowManager.minimize();
       } catch (_) {}
-    } else if (!kIsWeb && _settings.listenModeHideWindow) {
-      // 安卓：先把「听电视」背景亮出来，再退到后台隐藏窗口（声音继续）。
-      // 延迟 1.2 秒是为了让用户看见背景卡片，而不是瞬间消失
-      Future.delayed(const Duration(milliseconds: 1200), () async {
-        if (!_listenMode) return;
-        await moveToBackground();
-      });
+    } else if (!kIsWeb &&
+        _settings.listenModeHideWindow &&
+        !await _resolveIsTv() &&
+        // 通知权限被拒时卡片根本不显示；这时退后台就没有任何操作入口，
+        // 和电视端一样留在前台的信息卡片上
+        await notifGranted()) {
+      // 安卓手机/平板：先把官方「音频」档切好、确认真的在出声，再退后台。
+      // 退后台后 JS 定时器会被系统降频，切档流程很容易卡住，
+      // 结果就是通知卡片还能点、但一点声音都没有（前台时正常）。
+      // 电视端（_isTv）跳过：没有通知栏，退后台就再也回不到卡片
+      if (await _waitWebAudioReady()) {
+        // 稍等一下让用户看见背景卡片，而不是瞬间消失
+        await Future.delayed(const Duration(milliseconds: 600));
+        if (_listenMode) await moveToBackground();
+      } else {
+        // 切档超时也照样退后台，靠页面内的保活脚本继续拉流出声
+        Future.delayed(const Duration(milliseconds: 1200), () async {
+          if (!_listenMode) return;
+          await moveToBackground();
+        });
+      }
     }
-    notifyListeners();
   }
 
   Future<void> exitListenMode() async {

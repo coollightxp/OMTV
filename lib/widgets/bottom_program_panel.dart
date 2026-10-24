@@ -8,7 +8,9 @@ import 'scaled_panel.dart';
 
 /// 底部信息/控制面板
 /// 布局：台标 | 当前节目(大字)+时段/频道/分辨率 | 控制按钮
-/// 按钮顺序固定：播放/暂停、全屏/小窗、静音/恢复、听电视、锁定、设置、分辨率
+/// 按钮顺序固定：播放/暂停、全屏/小窗（电视端不显示）、静音/恢复、旋转、
+/// 截图/录像(桌面)、分辨率
+/// （听电视/锁定/设置与安卓一致，统一放在返回键弹出的退出面板里）
 ///
 /// 遥控器导航（TV 盒子无鼠标）：面板可见时，←/→ 在可用按钮间移动高亮，
 /// OK 激活当前按钮，返回键由播放页负责关闭面板。
@@ -348,16 +350,20 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         c.isPlaying ? '暂停' : '播放',
         hasChannel ? c.togglePlayPause : null,
       ),
-      _KbAction(
-        'fullmini',
-        c.isDesktop
-            ? (c.isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen)
-            : (c.miniWindow ? Icons.crop_free : Icons.picture_in_picture_alt),
-        c.isDesktop
-            ? (c.isFullscreen ? '退出全屏' : '全屏')
-            : (c.miniWindow ? '退出小窗' : '小窗播放'),
-        hasChannel ? widget.onToggleFullMini : null,
-      ),
+      // 电视端没有窗口概念：画中画/小窗没有意义，直接不提供该按钮
+      if (!c.isTv)
+        _KbAction(
+          'fullmini',
+          c.isDesktop
+              ? (c.isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen)
+              : (c.miniWindow
+                  ? Icons.crop_free
+                  : Icons.picture_in_picture_alt),
+          c.isDesktop
+              ? (c.isFullscreen ? '退出全屏' : '全屏')
+              : (c.miniWindow ? '退出小窗' : '小窗播放'),
+          hasChannel ? widget.onToggleFullMini : null,
+        ),
       _KbAction(
         'mute',
         c.isMuted ? Icons.volume_off : Icons.volume_up,
@@ -382,26 +388,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         c.videoRotation.value == 0 ? '旋转画面' : '恢复原始方向',
         hasChannel ? c.cycleVideoRotation : null,
       ),
-      // 听电视/锁定/设置：移动端底部按钮太多会把节目名挤到看不全，
-      // 这三项收进退出面板（返回键弹出）；桌面端空间充足仍保留在底部
-      if (c.isDesktop)
-        _KbAction(
-          'listen',
-          Icons.headphones,
-          c.listenMode ? '退出听电视' : '听电视',
-          hasChannel ? c.toggleListenMode : null,
-        ),
-      if (c.isDesktop)
-        _KbAction(
-          'lock',
-          c.locked ? Icons.lock : Icons.lock_open,
-          c.locked ? '已锁定' : '锁定屏幕',
-          c.locked ? null : c.toggleLock,
-          dismiss: true,
-        ),
-      if (c.isDesktop)
-        _KbAction('settings', Icons.settings, '设置', widget.onOpenSettings,
-            dismiss: true),
+      // 听电视/锁定/设置：与安卓保持一致，统一收进返回键弹出的退出面板，
+      // 底部只留播放相关按钮，避免窄窗口下图标挤压/与清晰度标签重叠
       _KbAction(
         'resolution',
         null,

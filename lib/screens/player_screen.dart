@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../services/osd_bus.dart';
+import '../services/pip.dart';
 import '../services/player_controller.dart';
 import '../services/system_power.dart';
 import '../services/web_diag.dart';
@@ -123,7 +124,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.0';
+  static const String _appVersion = '1.0.1';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -295,7 +296,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 收不到键盘消息）：d0-d9 数字选台，fullscreen 切换全屏
   void _onWebKey(String key) {
     if (_settingsOpen) return;
-    if (context.read<PlayerController>().locked) return;
+    final ctl = context.read<PlayerController>();
+    if (ctl.locked) return;
+    // 听电视卡片期间网页转发来的按键一律忽略，只认卡片自己的入口
+    if (ctl.listenMode) return;
     if (key.startsWith('d')) {
       final n = int.tryParse(key.substring(1));
       if (n != null) _onNumberKey(n);
@@ -820,9 +824,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       child: IgnorePointer(child: _LockBadge()),
                     ),
 
-                  // 听电视信息卡片（手机/平板，可在设置中关闭）
+                  // 听电视信息卡片（手机/平板，可在设置中关闭；
+                  // 电视端没有通知栏可操作，强制显示卡片作为唯一控制面）
                   if (controller.listenMode &&
-                      controller.settings.listenModeShowCard)
+                      (controller.settings.listenModeShowCard ||
+                          controller.isTv))
                     _ListenCard(controller: controller),
 
                   // 锁定层：吞掉全部触摸/鼠标操作（播放页/面板/听电视卡片
@@ -857,6 +863,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 锁定状态：返回键只用于解锁（安卓系统返回走这里）
     if (c.locked) {
       c.unlock();
+      return;
+    }
+    // 听电视卡片：返回键只退出卡片，不与面板/退出确认串联
+    if (c.listenMode) {
+      _resetKeyPairs();
+      await c.exitListenMode();
       return;
     }
     if (_settingsOpen) {
@@ -947,7 +959,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         const Text(
-                          'OMTV',
+                          '欧米电视',
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 24,
@@ -1009,7 +1021,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         c.toggleLock();
         break;
       case 'listen':
-        c.toggleListenMode();
+        _toggleListenMode();
         break;
       case 'shutdown':
         final isWindows =
@@ -1031,8 +1043,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           defaultTargetPlatform == TargetPlatform.linux);
 
   /// 退出框的按钮列表（顺序即遥控器 ←/→ 的移动顺序）。
-  /// 移动端底部面板按钮太多会挤压节目名，因此把「设置/锁定/听电视」
-  /// 收进这里，与返回/退出同一套方块风格。
+  /// 「设置/锁定/听电视」统一收进这里（桌面端与移动端一致），
+  /// 底部信息栏只保留播放相关按钮。
   List<_ExitOption> _buildExitOptions(PlayerController c) => <_ExitOption>[
         const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
         if (c.currentChannel != null)
@@ -1268,6 +1280,93 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     _bottomPanelKey.currentState?.handleRemoteKey(action, isDown: isDown);
   }
 
+  /// 清空按键按下-抬起配对状态（进入/退出听电视卡片时调用），
+  /// 避免残余按住状态在卡片关闭后误触面板/列表
+  void _resetKeyPairs() {
+    _okHeld = false;
+    _okDownInPanel = false;
+    _okLongFired = false;
+    _okLongTimer?.cancel();
+    _arrowDown = false;
+    _arrowLongFired = false;
+    _arrowLongTimer?.cancel();
+    _menuHeld = false;
+    _menuLongFired = false;
+    _menuLongTimer?.cancel();
+    // 原生钩子的按下去重表也要清空：否则进入卡片时若某键仍被视为按住，
+    // 卡片内第一次按下会被当成自动重复而丢弃
+    _nativeHeld.clear();
+  }
+
+  /// 听电视卡片：逻辑键 → 卡片动作（不认识的键返回 null，仍被卡片吞掉）
+  static String? _listenActionOf(LogicalKeyboardKey k) {
+    if (k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA ||
+        k == LogicalKeyboardKey.space ||
+        k == LogicalKeyboardKey.mediaPlayPause ||
+        k == LogicalKeyboardKey.mediaPlay ||
+        k == LogicalKeyboardKey.mediaPause) {
+      return 'ok';
+    }
+    if (k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.mediaTrackPrevious) {
+      return 'prev';
+    }
+    if (k == LogicalKeyboardKey.arrowRight ||
+        k == LogicalKeyboardKey.arrowDown ||
+        k == LogicalKeyboardKey.mediaTrackNext) {
+      return 'next';
+    }
+    // 返回：Esc / 遥控器返回 / 浏览器返回键都退出卡片
+    if (k == LogicalKeyboardKey.escape ||
+        k == LogicalKeyboardKey.goBack ||
+        k == LogicalKeyboardKey.browserBack) {
+      return 'back';
+    }
+    return null;
+  }
+
+  /// 听电视卡片：原生钩子动作名 → 卡片动作
+  /// （网页频道持有焦点时 WM_KEYDOWN 走 WinHotkeys 这条路径）
+  static String? _listenActionOfNative(String action) {
+    switch (action) {
+      case 'ok':
+      case 'space':
+        return 'ok';
+      case 'left':
+      case 'up':
+        return 'prev';
+      case 'right':
+      case 'down':
+        return 'next';
+      case 'back':
+      case 'esc':
+        return 'back';
+    }
+    return null;
+  }
+
+  /// 听电视卡片期间的唯一按键入口：只做卡片内操作，绝不外溢到
+  /// 频道列表/EPG/控制面板/退出确认。按键抬起边沿直接忽略。
+  void _handleListenCardKey(String? action, bool isDown) {
+    if (action == null || !isDown) return;
+    final c = context.read<PlayerController>();
+    switch (action) {
+      case 'ok':
+        c.togglePlayPause();
+      case 'prev':
+        c.previousChannel();
+      case 'next':
+        c.nextChannel();
+      case 'back':
+        _resetKeyPairs();
+        c.exitListenMode();
+    }
+  }
+
   /// 全局硬件按键处理（注册在 HardwareKeyboard 上，不依赖焦点）。
   /// 返回 true 表示事件已消费，不再向焦点链传递。
   ///
@@ -1310,6 +1409,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 才弹出时抬起事件丢失，导致按住状态卡死、关弹层后误触节目列表
     if (_modalRouteOpen) {
       return _handleKeyWhileModal(k, isDown, isUp);
+    }
+
+    // 听电视卡片独占按键：OK=暂停/继续，←/→/↑/↓=上一台/下一台，
+    // 返回=退出卡片。卡片显示期间不再响应频道列表/控制面板/其它快捷键
+    if (ctl.listenMode) {
+      _handleListenCardKey(_listenActionOf(k), isDown);
+      return true;
     }
 
     // OK 与左右方向键要区分短按/长按，走按下-抬起配对处理
@@ -2077,10 +2183,79 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       case 'lock':
         controller.toggleLock();
       case 'listen':
-        controller.toggleListenMode();
+        _toggleListenMode();
       case 'screenshot':
         _takeScreenshot();
     }
+  }
+
+  /// 听电视开关：进入前先收起频道列表/节目单/底部面板并清空按键配对，
+  /// 保证卡片期间按键只作用于卡片（实测残留面板会让 OK 拉出频道列表）
+  Future<void> _toggleListenMode() async {
+    final c = context.read<PlayerController>();
+    if (c.listenMode) {
+      _resetKeyPairs();
+      c.exitListenMode();
+      return;
+    }
+    // 安卓手机/平板：没有通知权限就没有通知卡片，隐藏窗口后无法操作。
+    // 首次遇到时给一次「去设置」引导（电视端不需要，跳过）。
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        !c.isTv) {
+      final granted = await notifGranted();
+      if (!mounted) return;
+      if (!granted && !_notifGuideShown) {
+        _notifGuideShown = true;
+        if (await _showNotifGuide() == true) {
+          // 去设置：先不进入听电视，开启权限后再按一次即可
+          await openNotifSettings();
+          return;
+        }
+        if (!mounted) return;
+      }
+    }
+    if (!mounted) return;
+    _bottomHideTimer?.cancel();
+    _resetKeyPairs();
+    setState(() {
+      _topBarVisible = false;
+      _leftDrawerOpen = false;
+      _rightEpgOpen = false;
+      _bottomPanelVisible = false;
+    });
+    c.toggleListenMode();
+  }
+
+  /// 本次运行是否已经提示过通知权限（避免每次听电视都弹）
+  static bool _notifGuideShown = false;
+
+  Future<bool?> _showNotifGuide() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1B1B1F),
+        title: const Text('开启通知权限',
+            style: TextStyle(color: Colors.white, fontSize: 20)),
+        content: const Text(
+          '听电视依靠通知栏卡片控制：上一台、暂停/继续、下一台。\n\n'
+          '当前未开启通知权限，隐藏窗口后将无法控制播放'
+          '（此时会保持在前台卡片上）。\n\n'
+          '可在系统设置中为本应用开启「通知」。',
+          style: TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('暂不'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('去设置'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 播放加载防抖：按下键到内核真正初始化完成期间，遥控器连按的
@@ -2191,6 +2366,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           action == 'menu') {
         Navigator.of(context).maybePop();
       }
+      return;
+    }
+    // 听电视卡片独占按键（网页/窗口持有焦点时走原生钩子这条路径）
+    if (ctl.listenMode) {
+      _handleListenCardKey(_listenActionOfNative(action), isDown);
       return;
     }
     // OK / 左右 / 菜单需要按下-抬起配对
@@ -2363,22 +2543,44 @@ class _BootSplash extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // logo 宽度按屏宽缩放并限幅；标题用 Flutter Text 渲染（矢量、任意
+    // 分辨率都清晰），不再依赖位图里的文字
+    final logoW = (MediaQuery.sizeOf(context).width * 0.22).clamp(150.0, 460.0);
+    final titleSize = (logoW * 0.12).clamp(22.0, 54.0);
     return Positioned.fill(
-      child: Container(
+      child: ColoredBox(
         color: Colors.black,
         child: Stack(
           children: [
-            // 启动图：纯黑底 + 居中 logo（splash.png 已裁掉原图的雾面背景）
-            Positioned.fill(
-              child: Center(
-                child: SizedBox(
-                  width: MediaQuery.sizeOf(context).width * 0.22,
-                  child: Image.asset(
-                    'branding/splash.png',
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: logoW,
+                    child: Image.asset(
+                      'branding/splash.png',
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    ),
                   ),
-                ),
+                  SizedBox(height: logoW * 0.06),
+                  Padding(
+                    // 抵消末字字距造成的视觉左偏
+                    padding: EdgeInsets.only(left: titleSize * 0.18),
+                    child: Text(
+                      '欧米电视',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: titleSize,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: titleSize * 0.18,
+                        height: 1.12,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             Positioned(
@@ -2656,7 +2858,8 @@ class _ListenCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 6),
                       const Text(
-                        '点击卡片返回播放界面',
+                        'OK 暂停/继续 · 左右或上下换台 · 返回退出',
+                        textAlign: TextAlign.center,
                         style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                     ],
@@ -3318,6 +3521,47 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     if (opener) qClick(opener);
   }
   setInterval(trySwitchRes, 1000);
+  // 听电视后台保活：应用退到后台后，系统/站点可能把 video 暂停或静音
+  // （听电视靠通知卡片操作，页面不可见），这里定时把声音拉回来。
+  // 用户主动暂停（__omUserPaused）时不干预。
+  function keepAudioAlive(){
+    if (!window.__omAudioOn || window.__omUserPaused) return;
+    // 注意：切「音频」档期间也要保活。后台里切档可能因定时器降频拖很久，
+    // 不能等它完成才把声音拉回来（否则这段时间就是无声）。
+    var vs = allVideos(document);
+    for (var i=0;i<vs.length;i++){
+      try {
+        var v = vs[i];
+        if (v.muted) v.muted = false;
+        var vol = window.__omVol;
+        if (typeof vol === 'number' && v.volume !== vol) v.volume = vol;
+        if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function(){}); }
+      } catch(e) {}
+    }
+  }
+  setInterval(keepAudioAlive, 1500);
+  // 退后台的一瞬间站点通常会自己暂停（visibilitychange），
+  // 这时定时器还没被系统降频，立刻拉回来最有效
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'hidden') {
+      setTimeout(keepAudioAlive, 0);
+      setTimeout(keepAudioAlive, 700);
+      setTimeout(keepAudioAlive, 2000);
+    }
+  });
+  // Dart 侧隐藏窗口前用它确认「音频档」已切好且确实在出声：
+  // 'pending'=还在切档，'1'=有声在播，'0'=没播起来
+  window.__omAudioReady = function(){
+    if (window.__omWantRes === 'audio') return 'pending';
+    var vs = allVideos(document);
+    for (var i=0;i<vs.length;i++){
+      try {
+        var v = vs[i];
+        if (v.readyState >= 2 && !v.paused && !v.muted && v.volume > 0) return '1';
+      } catch(e) {}
+    }
+    return '0';
+  };
   var lastMM = 0;
   function onMouseMove(){
     var n = Date.now();
@@ -5283,6 +5527,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       }
       // 嗅探脚本只在兜底重载后注入；默认页面保持零 hook 纯净环境
       if (_sniffEnabled) await c.evaluateJavascript(source: _sniffJs);
+      // 听电视期间（可能在后台）：页面重载后要重新落到官方「音频」档，
+      // 否则换台后只拉视频流，退后台容易没声音
+      if (mounted && context.read<PlayerController>().listenMode) {
+        context.read<PlayerController>().reapplyWebAudio();
+      }
       WebDiag.log('inject_done',
           'site=${siteJs != null ? 1 : 0}|sniff=$_sniffEnabled');
     } catch (_) {
@@ -5394,6 +5643,10 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
           initialSettings: InAppWebViewSettings(
             // 网页播放器（如央视频）自动开播，无需用户先点击网页
             mediaPlaybackRequiresUserGesture: false,
+            // 安卓退到后台/隐藏窗口后继续播放音频（听电视模式依赖）。
+            // 不加这一项 WebView 会随窗口不可见暂停媒体，导致通知卡片
+            // 按钮有效但完全没有声音
+            allowBackgroundAudioPlaying: true,
             supportZoom: false,
             transparentBackground: false,
             cacheMode: CacheMode.LOAD_DEFAULT,

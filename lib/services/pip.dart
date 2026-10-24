@@ -54,6 +54,37 @@ Future<bool> moveToBackground() async {
   }
 }
 
+/// 是否 Android TV / 电视盒子（Leanback 或电视系统特性）。
+/// 电视端没有通知栏可操作，「听电视」必须始终留在信息卡片上。
+Future<bool> isTvDevice() async {
+  try {
+    return await _channel.invokeMethod<bool>('isTv') ?? false;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// 通知权限是否已授予（Android 13+）。没权限时通知卡片不会显示，
+/// 隐藏窗口后将没有任何可操作入口，调用方应据此不隐藏。
+/// 其它平台没有该通道，一律视为可用（true）。
+Future<bool> notifGranted() async {
+  try {
+    return await _channel.invokeMethod<bool>('notifGranted') ?? true;
+  } catch (_) {
+    return true;
+  }
+}
+
+/// 打开系统里本应用的通知设置页（引导手动开启权限）。
+/// 成功打开返回 true；非安卓/无实现返回 false。
+Future<bool> openNotifSettings() async {
+  try {
+    return await _channel.invokeMethod<bool>('openNotifSettings') ?? false;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 更新通知栏「音频播放」卡片（前台服务，含上一台/暂停/下一台/关闭）
 Future<void> audioNotify(
     {required String name,

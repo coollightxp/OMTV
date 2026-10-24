@@ -95,8 +95,11 @@ jobs:
           grep -q 'supportsPictureInPicture' $MANIFEST || sed -i 's|android:name=".MainActivity"|android:name=".MainActivity"\n            android:supportsPictureInPicture="true"\n            android:resizeableActivity="true"|' $MANIFEST
           grep -q 'supportsPictureInPicture' $MANIFEST || { echo "::error::PiP 属性未写入 AndroidManifest"; exit 1; }
           # 听电视：Android 14 起媒体播放前台服务必须声明类型与对应权限
-          grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
+          grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' $MANIFEST
           grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || { echo "::error::前台服务权限未写入 AndroidManifest"; exit 1; }
+          # 听电视退后台后要保持 CPU 不休眠，否则网页音频会停
+          grep -q 'android.permission.WAKE_LOCK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' $MANIFEST
+          grep -q 'android.permission.WAKE_LOCK' $MANIFEST || { echo "::error::唤醒锁权限未写入 AndroidManifest"; exit 1; }
           grep -q 'AudioPlaybackService' $MANIFEST || sed -i 's|</application>|    <service android:name=".AudioPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
           grep -q 'AudioPlaybackService' $MANIFEST || { echo "::error::音频前台服务未写入 AndroidManifest"; exit 1; }
           grep -q 'foregroundServiceType="mediaPlayback"' $MANIFEST || { echo "::error::前台服务缺少 mediaPlayback 类型"; exit 1; }
@@ -123,6 +126,7 @@ jobs:
           import android.media.session.PlaybackState
           import android.os.Build
           import android.os.IBinder
+          import android.os.PowerManager
 
           /**
            * 听电视：前台服务 + 媒体通知卡片
@@ -177,6 +181,7 @@ jobs:
               }
 
               private var session: MediaSession? = null
+              private var wakeLock: PowerManager.WakeLock? = null
               private var curName: String = ""
               private var curProgram: String = ""
               private var playing: Boolean = true
@@ -204,6 +209,15 @@ jobs:
                   super.onCreate()
                   running = true
                   createChannel()
+                  // 退后台/息屏后网页音频要继续出声：前台服务本身不阻止 CPU 休眠，
+                  // 必须自己持有一个 PARTIAL_WAKE_LOCK（6 小时后自动释放，防止忘记）
+                  try {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "omtv:audio")
+                      wakeLock?.setReferenceCounted(false)
+                      wakeLock?.acquire(6 * 60 * 60 * 1000L)
+                  } catch (_: Exception) {
+                  }
                   session = MediaSession(this, "OMTV").apply {
                       setCallback(object : MediaSession.Callback() {
                           override fun onPlay() = emit("playpause")
@@ -249,6 +263,9 @@ jobs:
 
               override fun onDestroy() {
                   running = false
+                  try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {
+                  }
+                  wakeLock = null
                   try {
                       unregisterReceiver(actionReceiver)
                   } catch (_: Exception) {
@@ -407,13 +424,17 @@ jobs:
           cat > $KS_DIR/MainActivity.kt <<'KOTLIN'
           package com.example.omplayer
 
+          import android.Manifest
           import android.app.PictureInPictureParams
           import android.content.BroadcastReceiver
           import android.content.Context
           import android.content.Intent
           import android.content.IntentFilter
+          import android.content.pm.PackageManager
           import android.content.res.Configuration
           import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
           import android.util.Rational
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -427,6 +448,53 @@ jobs:
                   override fun onReceive(context: Context?, intent: Intent?) {
                       val cmd = intent?.getStringExtra(AudioPlaybackService.EXTRA_CMD)
                       if (!cmd.isNullOrEmpty()) channel?.invokeMethod("audio", cmd)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  ensureNotificationPermission()
+              }
+
+              /** 是否电视端：盒子/电视没有可操作的通知栏，不需要通知权限 */
+              private fun isTvDevice(): Boolean {
+                  val pm = packageManager
+                  val uiMode = (getSystemService(Context.UI_MODE_SERVICE)
+                      as? android.app.UiModeManager)?.currentModeType
+                      ?: Configuration.UI_MODE_TYPE_UNDEFINED
+                  return pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                      pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION) ||
+                      pm.hasSystemFeature("android.hardware.type.television") ||
+                      uiMode == Configuration.UI_MODE_TYPE_TELEVISION
+              }
+
+              /** 通知权限是否已具备（Android 13 以下无需运行时权限） */
+              private fun hasNotificationPermission(): Boolean =
+                  Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                      PackageManager.PERMISSION_GRANTED
+
+              /** 申请通知权限（Android 13+）：
+               *  - 电视端跳过：听电视卡片就在画面上，不靠通知栏
+               *  - 已授权、或系统已永久拒绝（不再弹框）→ 不打扰
+               *  - 首次启动 / 上次只是普通拒绝（系统仍允许弹框）→ 每次冷启动再问，
+               *    避免「只问一次，拒绝后通知卡片永远出不来」 */
+              private fun ensureNotificationPermission() {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+                  if (isTvDevice()) return
+                  if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                      == PackageManager.PERMISSION_GRANTED) return
+                  val prefs = getSharedPreferences("omtv_native", MODE_PRIVATE)
+                  val askedBefore = prefs.getBoolean("notif_asked", false)
+                  // 请求过一次且系统不再允许弹框 = 永久拒绝，只能去系统设置手动开
+                  if (askedBefore &&
+                      !shouldShowRequestPermissionRationale(
+                          Manifest.permission.POST_NOTIFICATIONS)) return
+                  prefs.edit().putBoolean("notif_asked", true).apply()
+                  try {
+                      requestPermissions(
+                          arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4101)
+                  } catch (_: Exception) {
                   }
               }
 
@@ -467,6 +535,28 @@ jobs:
                           "audioStop" -> {
                               AudioPlaybackService.stop(this)
                               result.success(true)
+                          }
+                          // 电视端检测：盒子/电视没有可操作的通知栏，
+                          // 听电视要一直留在卡片上
+                          "isTv" -> result.success(isTvDevice())
+                          // 通知权限状态：没权限时隐藏窗口就没有可操作的卡片，
+                          // Dart 侧会因此不退后台
+                          "notifGranted" -> result.success(hasNotificationPermission())
+                          // 打开本应用的通知设置页（引导用户手动开启权限）
+                          "openNotifSettings" -> {
+                              try {
+                                  val i = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                      Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                          .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                  } else {
+                                      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                          .setData(android.net.Uri.parse("package:$packageName"))
+                                  }
+                                  startActivity(i)
+                                  result.success(true)
+                              } catch (e: Exception) {
+                                  result.success(false)
+                              }
                           }
                           else -> result.notImplemented()
                       }
