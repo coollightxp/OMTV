@@ -78,6 +78,12 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   @override
   void didUpdateWidget(BottomProgramPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 面板收起时顺带关掉清晰度菜单，避免下次呼出时残留
+    if (!widget.isVisible && _resMenuOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _resMenuOpen) setState(() => _resMenuOpen = false);
+      });
+    }
     // 面板每次被呼出时，默认高亮「播放/暂停」（不可用时取第一个可用按钮）
     if (widget.isVisible && !oldWidget.isVisible) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -97,6 +103,11 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   /// 遥控器按键：←/→ 在【可用】按钮间移动高亮，OK 激活当前按钮
   void handleRemoteKey(String action, {required bool isDown}) {
     if (!widget.isVisible) return;
+    // 清晰度菜单打开时：↑/↓ 选条目、OK 确认、返回关闭，不再切按钮
+    if (_resMenuOpen) {
+      handleResMenuKey(action, isDown: isDown);
+      return;
+    }
     final enabled = _enabledActions;
     if (enabled.isEmpty) return;
     if (action == 'left' || action == 'right') {
@@ -178,6 +189,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                     builder: (context, c, _) => Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        // 清晰度菜单：面板内自绘，遥控器 ↑/↓ 选择、OK 确认
+                        if (_resMenuOpen) _buildResMenu(c),
                         if (c.isSeekable) _buildSeekBar(c),
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
@@ -394,7 +407,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         null,
         '清晰度',
         hasChannel ? () => _openResolutionMenu(c) : null,
-        dismiss: true,
+        // 打开菜单后面板要留着（菜单在面板内），不能按 OK 就收起
+        dismiss: false,
       ),
     ];
     _actions = actions;
@@ -455,27 +469,126 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
     );
   }
 
-  Future<void> _openResolutionMenu(PlayerController c) async {
-    final box = context.findRenderObject() as RenderBox?;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox?;
-    if (box == null || overlay == null) return;
-    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
-    final selected = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromLTRB(
-        origin.dx + box.size.width - 200,
-        origin.dy - 150,
-        overlay.size.width - (origin.dx + box.size.width),
-        overlay.size.height - origin.dy,
+  // ==================== 分辨率菜单 ====================
+  // 不再用 showMenu：路由弹层收不到遥控器的 ↑/↓/OK（这些键在播放页
+  // 统一分发，弹层是独立路由拿不到），改为面板内自绘菜单，
+  // 由 handleResMenuKey 处理遥控器导航
+
+  static const List<String> _resOptions = ['1080P', '720P', '540P'];
+  static const Map<String, String> _resTitles = {
+    '1080P': '1080P 高清',
+    '720P': '720P 准高清',
+    '540P': '540P 标清',
+  };
+
+  bool _resMenuOpen = false;
+  int _resIndex = 0;
+
+  void _openResolutionMenu(PlayerController c) {
+    setState(() {
+      if (_resMenuOpen) {
+        _resMenuOpen = false;
+        return;
+      }
+      _resMenuOpen = true;
+      final i = _resOptions.indexOf(c.resolution);
+      _resIndex = i < 0 ? 0 : i;
+    });
+  }
+
+  Future<void> _applyResolution(String level) async {
+    setState(() => _resMenuOpen = false);
+    await context.read<PlayerController>().setResolution(level);
+  }
+
+  /// 遥控器/键盘在分辨率菜单内的导航；菜单未打开时返回 false 表示未消费
+  bool handleResMenuKey(String action, {required bool isDown}) {
+    if (!_resMenuOpen) return false;
+    if (!isDown) return true;
+    switch (action) {
+      case 'up':
+        setState(() => _resIndex =
+            (_resIndex - 1 + _resOptions.length) % _resOptions.length);
+        return true;
+      case 'down':
+        setState(
+            () => _resIndex = (_resIndex + 1) % _resOptions.length);
+        return true;
+      case 'ok':
+        _applyResolution(_resOptions[_resIndex]);
+        return true;
+      case 'back':
+      case 'esc':
+        setState(() => _resMenuOpen = false);
+        return true;
+    }
+    return true;
+  }
+
+  /// 供播放页在返回键时调用：菜单打开则只关菜单
+  bool closeResMenu() {
+    if (!_resMenuOpen) return false;
+    setState(() => _resMenuOpen = false);
+    return true;
+  }
+
+  Widget _buildResMenu(PlayerController c) {
+    final current = c.resolution;
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8, right: 4),
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white.withOpacity(0.12)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < _resOptions.length; i++)
+              InkWell(
+                onTap: () => _applyResolution(_resOptions[i]),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: i == _resIndex
+                        ? Colors.amber.withOpacity(0.18)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 18,
+                        child: _resOptions[i] == current
+                            ? const Icon(Icons.check,
+                                color: Colors.amber, size: 16)
+                            : null,
+                      ),
+                      Text(
+                        _resTitles[_resOptions[i]] ?? _resOptions[i],
+                        style: TextStyle(
+                          color: i == _resIndex
+                              ? Colors.white
+                              : Colors.white70,
+                          fontSize: 14,
+                          fontWeight: i == _resIndex
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
-      items: const [
-        PopupMenuItem(value: '1080P', child: Text('1080P 高清')),
-        PopupMenuItem(value: '720P', child: Text('720P 准高清')),
-        PopupMenuItem(value: '540P', child: Text('540P 标清')),
-      ],
     );
-    if (selected != null) await c.setResolution(selected);
   }
 
   Widget _btn(_KbAction a, {bool big = false}) {

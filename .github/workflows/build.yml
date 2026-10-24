@@ -78,6 +78,436 @@ jobs:
           </resources>
           XML
 
+      # 系统画中画（浮窗小窗）+ 听电视通知卡片（前台服务）：
+      # android/ 由 flutter create 现场生成，原生通道只能在这里写进去
+      - name: Patch Android PiP / audio notification service
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # 上一步已经把 launchMode 写进 <activity>，这里以它为锚点追加 PiP 属性
+          # （否则 <activity 后已不是空格，直接匹配会落空）
+          sed -i 's|android:launchMode="singleTask"|android:launchMode="singleTask" android:supportsPictureInPicture="true" android:resizeableActivity="true"|' $MANIFEST
+          grep -q 'supportsPictureInPicture' $MANIFEST || echo "::warning::PiP 属性未写入 AndroidManifest"
+          # 听电视：媒体播放前台服务权限 + 通知权限 + 服务声明
+          grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application|' $MANIFEST
+          grep -q 'AudioPlaybackService' $MANIFEST || sed -i 's|</application>|    <service android:name=".AudioPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
+          grep -q 'AudioPlaybackService' $MANIFEST || echo "::warning::音频前台服务未写入 AndroidManifest"
+          KS_DIR=android/app/src/main/kotlin/com/example/omplayer
+          mkdir -p $KS_DIR
+          cat > $KS_DIR/AudioPlaybackService.kt <<'KOTLIN'
+          package com.example.omplayer
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.drawable.Icon
+          import android.media.MediaMetadata
+          import android.media.session.MediaSession
+          import android.media.session.PlaybackState
+          import android.os.Build
+          import android.os.IBinder
+
+          /**
+           * 听电视：前台服务 + 媒体通知卡片
+           * - 卡片内容：频道名 + 正在播节目 + 播放状态
+           * - 动作按钮：上一台 / 播放暂停 / 下一台 / 关闭（回 App 并切回画面）
+           * - 按钮命令通过广播回传 MainActivity，再由 MethodChannel 转给 Flutter
+           */
+          class AudioPlaybackService : Service() {
+
+              companion object {
+                  const val CHANNEL_ID = "omtv_audio"
+                  const val NOTIF_ID = 4101
+
+                  const val ACT_PLAY_PAUSE = "com.example.omplayer.ACTION_PLAY_PAUSE"
+                  const val ACT_PREV = "com.example.omplayer.ACTION_PREV"
+                  const val ACT_NEXT = "com.example.omplayer.ACTION_NEXT"
+
+                  /** 服务 → Activity 的指令广播 */
+                  const val ACTION_CMD = "com.example.omplayer.AUDIO_CMD"
+                  const val EXTRA_CMD = "cmd"
+
+                  /** 已在运行：后续只更新内容，避免安卓 12+ 后台启动前台服务限制 */
+                  private var running = false
+
+                  fun start(ctx: Context, name: String, program: String, playing: Boolean) {
+                      val i = Intent(ctx, AudioPlaybackService::class.java).apply {
+                          action = "update"
+                          putExtra("name", name)
+                          putExtra("program", program)
+                          putExtra("playing", playing)
+                      }
+                      try {
+                          if (running) {
+                              // 服务已是前台服务：普通 startService 允许（前台服务状态豁免）
+                              ctx.startService(i)
+                          } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              ctx.startForegroundService(i)
+                          } else {
+                              ctx.startService(i)
+                          }
+                      } catch (e: Exception) {
+                          try {
+                              ctx.startService(i)
+                          } catch (_: Exception) {
+                          }
+                      }
+                  }
+
+                  fun stop(ctx: Context) {
+                      ctx.stopService(Intent(ctx, AudioPlaybackService::class.java))
+                  }
+              }
+
+              private var session: MediaSession? = null
+              private var curName: String = ""
+              private var curProgram: String = ""
+              private var playing: Boolean = true
+
+              private val actionReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      when (intent?.action) {
+                          ACT_PLAY_PAUSE -> emit("playpause")
+                          ACT_PREV -> emit("prev")
+                          ACT_NEXT -> emit("next")
+                      }
+                  }
+              }
+
+              private fun emit(cmd: String) {
+                  sendBroadcast(
+                      Intent(ACTION_CMD).setPackage(packageName).putExtra(EXTRA_CMD, cmd)
+                  )
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              @Suppress("DEPRECATION")
+              override fun onCreate() {
+                  super.onCreate()
+                  running = true
+                  createChannel()
+                  session = MediaSession(this, "OMTV").apply {
+                      setCallback(object : MediaSession.Callback() {
+                          override fun onPlay() = emit("playpause")
+                          override fun onPause() = emit("playpause")
+                          override fun onSkipToNext() = emit("next")
+                          override fun onSkipToPrevious() = emit("prev")
+                          override fun onStop() {
+                              emit("stop")
+                              stopSelf()
+                          }
+                      })
+                      isActive = true
+                  }
+                  val f = IntentFilter().apply {
+                      addAction(ACT_PLAY_PAUSE)
+                      addAction(ACT_PREV)
+                      addAction(ACT_NEXT)
+                  }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(actionReceiver, f, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      registerReceiver(actionReceiver, f)
+                  }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  intent?.let {
+                      curName = it.getStringExtra("name") ?: curName
+                      curProgram = it.getStringExtra("program") ?: curProgram
+                      playing = it.getBooleanExtra("playing", playing)
+                  }
+                  val n = buildNotification()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(
+                          NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                      )
+                  } else {
+                      startForeground(NOTIF_ID, n)
+                  }
+                  updateSession()
+                  return START_NOT_STICKY
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  try {
+                      unregisterReceiver(actionReceiver)
+                  } catch (_: Exception) {
+                  }
+                  session?.isActive = false
+                  session?.release()
+                  session = null
+                  super.onDestroy()
+              }
+
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                      nm.createNotificationChannel(
+                          NotificationChannel(
+                              CHANNEL_ID, "听电视", NotificationManager.IMPORTANCE_LOW
+                          ).apply {
+                              description = "听电视后台播放控制"
+                              setShowBadge(false)
+                          }
+                      )
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun newBuilder(): Notification.Builder =
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      Notification.Builder(this, CHANNEL_ID)
+                  } else {
+                      Notification.Builder(this)
+                  }
+
+              /** 通知按钮：走广播而不是 startService，避免前台服务超时异常 */
+              private fun broadcastPi(action: String, code: Int): PendingIntent {
+                  val i = Intent(action).setPackage(packageName)
+                  var fl = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      fl = fl or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getBroadcast(this, code, i, fl)
+              }
+
+              /**
+               * 点击卡片 / 关闭：用 getActivity 的 PendingIntent 拉回前台。
+               * Android 10+ 禁止后台组件直接 startActivity，用户点通知属于豁免场景。
+               */
+              private fun openActivityPi(code: Int, closeAudio: Boolean): PendingIntent {
+                  val i = Intent(this, MainActivity::class.java)
+                      .addFlags(
+                          Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                              Intent.FLAG_ACTIVITY_NEW_TASK or
+                              Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                      )
+                      .putExtra("restoreVideo", true)
+                      .putExtra("closeAudio", closeAudio)
+                  var fl = PendingIntent.FLAG_UPDATE_CURRENT
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      fl = fl or PendingIntent.FLAG_IMMUTABLE
+                  }
+                  return PendingIntent.getActivity(this, code, i, fl)
+              }
+
+              private fun actionOf(
+                  iconId: Int,
+                  title: String,
+                  pending: PendingIntent
+              ): Notification.Action =
+                  Notification.Action.Builder(
+                      Icon.createWithResource(this, iconId), title, pending
+                  ).build()
+
+              private fun appIcon(): Bitmap? = try {
+                  BitmapFactory.decodeResource(resources, applicationInfo.icon)
+              } catch (_: Exception) {
+                  null
+              }
+
+              private fun buildNotification(): Notification {
+                  val b = newBuilder()
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .setContentTitle(curName.ifEmpty { "欧米电视" })
+                      .setContentText(
+                          if (curProgram.isNotEmpty()) "正在播 $curProgram" else "音频播放中"
+                      )
+                      .setContentIntent(openActivityPi(1, true))
+                      .setVisibility(Notification.VISIBILITY_PUBLIC)
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                  appIcon()?.let { b.setLargeIcon(it) }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                      b.setStyle(
+                          Notification.MediaStyle()
+                              .setMediaSession(session?.sessionToken)
+                              .setShowActionsInCompactView(0, 1, 2)
+                      )
+                  }
+                  b.addAction(
+                      actionOf(
+                          android.R.drawable.ic_media_previous, "上一台",
+                          broadcastPi(ACT_PREV, 2)
+                      )
+                  )
+                  b.addAction(
+                      actionOf(
+                          if (playing) android.R.drawable.ic_media_pause
+                          else android.R.drawable.ic_media_play,
+                          if (playing) "暂停" else "播放",
+                          broadcastPi(ACT_PLAY_PAUSE, 3)
+                      )
+                  )
+                  b.addAction(
+                      actionOf(
+                          android.R.drawable.ic_media_next, "下一台",
+                          broadcastPi(ACT_NEXT, 4)
+                      )
+                  )
+                  b.addAction(
+                      actionOf(
+                          android.R.drawable.ic_menu_close_clear_cancel, "关闭",
+                          openActivityPi(5, true)
+                      )
+                  )
+                  return b.build()
+              }
+
+              private fun updateSession() {
+                  val s = session ?: return
+                  s.setMetadata(
+                      MediaMetadata.Builder()
+                          .putString(
+                              MediaMetadata.METADATA_KEY_TITLE, curName.ifEmpty { "欧米电视" }
+                          )
+                          .putString(MediaMetadata.METADATA_KEY_ARTIST, curProgram)
+                          .build()
+                  )
+                  s.setPlaybackState(
+                      PlaybackState.Builder()
+                          .setActions(
+                              PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                                  PlaybackState.ACTION_PLAY_PAUSE or
+                                  PlaybackState.ACTION_SKIP_TO_NEXT or
+                                  PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                                  PlaybackState.ACTION_STOP
+                          )
+                          .setState(
+                              if (playing) PlaybackState.STATE_PLAYING
+                              else PlaybackState.STATE_PAUSED,
+                              PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f
+                          )
+                          .build()
+                  )
+              }
+          }
+          KOTLIN
+          cat > $KS_DIR/MainActivity.kt <<'KOTLIN'
+          package com.example.omplayer
+
+          import android.app.PictureInPictureParams
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.res.Configuration
+          import android.os.Build
+          import android.util.Rational
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private var channel: MethodChannel? = null
+
+              /** 听电视卡片按钮：原生广播 → Flutter（activity 退到后台也保持注册） */
+              private val audioCmdReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      val cmd = intent?.getStringExtra(AudioPlaybackService.EXTRA_CMD)
+                      if (!cmd.isNullOrEmpty()) channel?.invokeMethod("audio", cmd)
+                  }
+              }
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "omtv/pip")
+                  channel?.setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "enter" -> {
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                  try {
+                                      val params = PictureInPictureParams.Builder()
+                                          .setAspectRatio(Rational(16, 9))
+                                          .build()
+                                      setPictureInPictureParams(params)
+                                      result.success(enterPictureInPictureMode(params))
+                                  } catch (e: Exception) {
+                                      result.success(false)
+                                  }
+                              } else {
+                                  result.success(false)
+                              }
+                          }
+                          "exit" -> result.success(true)
+                          "background" -> {
+                              moveTaskToBack(true)
+                              result.success(true)
+                          }
+                          "audioUpdate" -> {
+                              AudioPlaybackService.start(
+                                  this,
+                                  call.argument<String>("name") ?: "",
+                                  call.argument<String>("program") ?: "",
+                                  call.argument<Boolean>("playing") ?: true
+                              )
+                              result.success(true)
+                          }
+                          "audioStop" -> {
+                              AudioPlaybackService.stop(this)
+                              result.success(true)
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+                  val f = IntentFilter(AudioPlaybackService.ACTION_CMD)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(audioCmdReceiver, f, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      registerReceiver(audioCmdReceiver, f)
+                  }
+                  handleAudioIntent(intent)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  handleAudioIntent(intent)
+              }
+
+              /** 卡片点击/关闭：回到前台后让 Flutter 退出听电视、恢复画面 */
+              private fun handleAudioIntent(intent: Intent?) {
+                  if (intent == null) return
+                  if (intent.getBooleanExtra("closeAudio", false)) {
+                      intent.removeExtra("closeAudio")
+                      intent.removeExtra("restoreVideo")
+                      channel?.invokeMethod("audio", "stop")
+                  } else if (intent.getBooleanExtra("restoreVideo", false)) {
+                      intent.removeExtra("restoreVideo")
+                      channel?.invokeMethod("audio", "restore")
+                  }
+              }
+
+              override fun onDestroy() {
+                  try {
+                      unregisterReceiver(audioCmdReceiver)
+                  } catch (_: Exception) {
+                  }
+                  super.onDestroy()
+              }
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+                  channel?.invokeMethod("pip", isInPictureInPictureMode)
+              }
+          }
+          KOTLIN
+
       - name: Install dependencies
         run: flutter pub get
 

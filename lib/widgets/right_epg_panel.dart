@@ -239,28 +239,38 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   Widget _buildHeader() {
     return Consumer<PlayerController>(
       builder: (context, controller, _) {
+        // 手机窄屏：三行标题 + 关闭按钮同样会挤压换行，收紧字号与内边距
+        final narrow = MediaQuery.sizeOf(context).shortestSide < 700;
         return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: EdgeInsets.symmetric(
+              horizontal: narrow ? 12 : 16, vertical: narrow ? 8 : 12),
           child: Row(
             children: [
-              const Icon(Icons.menu_open, color: Colors.white, size: 22),
-              const SizedBox(width: 10),
+              Icon(Icons.menu_open,
+                  color: Colors.white, size: narrow ? 18 : 22),
+              SizedBox(width: narrow ? 8 : 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
+                    Text(
                       '节目单 EPG',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 17,
+                        fontSize: narrow ? 14 : 17,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     Text(
                       controller.currentChannel?.name ?? '未选择频道',
-                      style: const TextStyle(
-                          color: Colors.white54, fontSize: 12),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          color: Colors.white54,
+                          fontSize: narrow ? 11 : 12),
                     ),
                     // 联动显示当前正在播放的节目名
                     if (controller.currentProgram != null)
@@ -268,14 +278,19 @@ class RightEpgPanelState extends State<RightEpgPanel> {
                         '正在直播：${controller.currentProgram!.title}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Colors.greenAccent, fontSize: 12),
+                        style: TextStyle(
+                            color: Colors.greenAccent,
+                            fontSize: narrow ? 11 : 12),
                       ),
                   ],
                 ),
               ),
               IconButton(
-                icon: const Icon(Icons.close, color: Colors.white70),
+                icon: Icon(Icons.close,
+                    color: Colors.white70, size: narrow ? 18 : 24),
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
                 onPressed: widget.onClose,
               ),
             ],

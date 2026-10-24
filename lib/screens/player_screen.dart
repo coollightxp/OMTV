@@ -559,6 +559,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                                 : const SizedBox.shrink()),
                   ),
 
+                  // 听电视背景：纯黑 + 音符 + 台名/节目名，替代视频画面
+                  // （视频/网页仍在底下出声，听电视期间不显示画面）
+                  if (controller.listenMode)
+                    Positioned.fill(child: _ListenBackdrop(controller: controller)),
+
                   // 亮度说明：不再使用全屏遮罩——它与 ScreenBrightness 的
   // 原生亮度调节重复，且会让视频画面常驻一层灰蒙蒙；桌面（gamma ramp）与
   // 安卓（系统亮度）统一走原生亮度，网页频道同理。
@@ -858,6 +863,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       setState(() => _settingsOpen = false);
       return;
     }
+    // 清晰度菜单打开时：返回键只关菜单，不关面板/不退全屏
+    if (_bottomPanelKey.currentState?.closeResMenu() ?? false) return;
     if (c.isCasting) {
       // 投屏中：返回键需连按两次才断开（3 秒内），避免误触直接退出投屏；
       // 也可直接点底部面板上的「断开投屏」按钮一次性断开
@@ -1028,14 +1035,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 收进这里，与返回/退出同一套方块风格。
   List<_ExitOption> _buildExitOptions(PlayerController c) => <_ExitOption>[
         const _ExitOption(Icons.arrow_back, '返回', Colors.blueAccent, 'back'),
-        const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
-        const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
-        if (!c.locked)
-          const _ExitOption(
-              Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
         if (c.currentChannel != null)
           _ExitOption(Icons.headphones, c.listenMode ? '退出听电视' : '听电视',
               Colors.purpleAccent, 'listen'),
+        if (!c.locked)
+          const _ExitOption(
+              Icons.lock_open, '锁定', Colors.amberAccent, 'lock'),
+        const _ExitOption(Icons.settings, '设置', Colors.tealAccent, 'settings'),
+        const _ExitOption(Icons.logout, '退出', Colors.redAccent, 'exit'),
         if (_canShutdownSystem)
           const _ExitOption(Icons.power_settings_new, '关机', Colors.orangeAccent,
               'shutdown'),
@@ -1540,7 +1547,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       _panelKey(isUp ? 'up' : 'down', true);
       return;
     }
-    if (_bottomPanelActive) return;
+    if (_bottomPanelActive) {
+      // 底部面板的清晰度菜单打开时：↑/↓ 在菜单项间移动，不能切台
+      _bottomPanelRemoteKey(isUp ? 'up' : 'down', true);
+      return;
+    }
     _onArrow(isUp ? 'prevChannel' : 'nextChannel');
   }
 
@@ -2357,13 +2368,16 @@ class _BootSplash extends StatelessWidget {
         color: Colors.black,
         child: Stack(
           children: [
+            // 启动图：纯黑底 + 居中 logo（splash.png 已裁掉原图的雾面背景）
             Positioned.fill(
-              child: Padding(
-                padding: const EdgeInsets.all(28),
-                child: Image.asset(
-                  'branding/splash.jpg',
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              child: Center(
+                child: SizedBox(
+                  width: MediaQuery.sizeOf(context).width * 0.22,
+                  child: Image.asset(
+                    'branding/splash.png',
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ),
                 ),
               ),
             ),
@@ -2423,6 +2437,98 @@ class _LockBadge extends StatelessWidget {
             style: TextStyle(color: Colors.white70, fontSize: 12.5),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 听电视背景：纯黑底 + 音符 + 台名/节目名，替代视频画面。
+/// 视频/网页仍在后台出声，这里只做视觉呈现，不画任何视频。
+class _ListenBackdrop extends StatelessWidget {
+  final PlayerController controller;
+  const _ListenBackdrop({required this.controller});
+
+  static final _hm = DateFormat('HH:mm');
+
+  @override
+  Widget build(BuildContext context) {
+    final ch = controller.currentChannel;
+    final program = controller.currentProgram;
+    final shortest = MediaQuery.sizeOf(context).shortestSide;
+    final iconBox = shortest * 0.16;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      // 点击任意位置退出听电视（电视端无触摸，用遥控器 OK/返回退出）
+      onTap: controller.exitListenMode,
+      child: ColoredBox(
+        color: Colors.black,
+        child: SafeArea(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: iconBox,
+                  height: iconBox,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.amber.withOpacity(0.10),
+                    border: Border.all(color: Colors.amber.withOpacity(0.35)),
+                  ),
+                  child: Icon(Icons.music_note,
+                      color: Colors.amber, size: iconBox * 0.55),
+                ),
+                SizedBox(height: iconBox * 0.42),
+                Text(
+                  '听电视',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: shortest * 0.045,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: shortest * 0.010,
+                  ),
+                ),
+                SizedBox(height: iconBox * 0.28),
+                Container(
+                  width: iconBox * 0.9,
+                  height: 1,
+                  color: Colors.white12,
+                ),
+                SizedBox(height: iconBox * 0.28),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Text(
+                    ch?.name ?? '未选择频道',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: shortest * 0.038,
+                    ),
+                  ),
+                ),
+                if (program != null) ...[
+                  SizedBox(height: iconBox * 0.14),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    child: Text(
+                      '${_hm.format(program.startTime)} - '
+                      '${_hm.format(program.endTime)}  ${program.title}',
+                      maxLines: 2,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white38,
+                        fontSize: shortest * 0.026,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -3071,56 +3177,147 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     window.__omUserPaused = false;
     kick();
   };
-  // ===== 清晰度切换（1080/720/540）=====
-  // 通过点击站点播放器清晰度菜单生效；同时把实际视频尺寸回传 Dart，
-  // 让控制栏文字优先显示真实分辨率。
+  // ===== 清晰度 / 纯音频切换 =====
+  // 央视频官方播放器：清晰度条目 ID 为 resolution_item_<n>_player，
+  // 文本形如「蓝光 1080P」「超清 720P」「标清」，部分频道还有「音频」档；
+  // 控制栏平时 display:none —— 必须先点一下画面唤醒，再点「当前档」
+  // 才能把清晰度菜单展开，之后才点得到目标档。
+  function __omVideoH(){
+    var vs = allVideos(document);
+    var m = 0;
+    for (var i=0;i<vs.length;i++){ if ((vs[i].videoHeight || 0) > m) m = vs[i].videoHeight; }
+    return m;
+  }
   window.__omSetRes = function(level){
     var want = String(level);
+    if (want !== '1080' && want !== '720' && want !== '540') return;
     if (window.__omWantRes !== want) window.__omWantResTries = 0;
     window.__omWantRes = want;
+    // 记住用户选的档位：安卓画中画缩放/播放器重载后站点会自动降档，
+    // 靠这个锁定值发现降档再切回来
+    window.__omResLock = want;
+    window.__omResLockAt = Date.now();
+    // 立即试一次：画中画里页面定时器可能被系统降频，不能只等 setInterval
+    try { trySwitchRes(); } catch (e) {}
   };
-  function resText(el){
-    return ((el.innerText || el.textContent || '') + '').trim().toUpperCase();
+  // 听电视：切到官方「音频」档（音画分离流，真正省流量），退出时还原
+  // base：App 侧当前设定的画质档（'1080'/'720'/'540'），换台重建页面后也能正确还原
+  window.__omAudio = function(on, base){
+    if (on) {
+      var h = __omVideoH();
+      var cur = h >= 1000 ? '1080' : (h >= 700 ? '720' : (h >= 500 ? '540' : ''));
+      var want = window.__omWantRes;
+      window.__omAudioPrev =
+        (base === '1080' || base === '720' || base === '540') ? base
+          : (cur || (want && want !== 'audio' ? want : '1080'));
+      // 记住退出时要还原的档位，同时保留为清晰度锁定值（退出后浮窗降档仍能切回）
+      if (base === '1080' || base === '720' || base === '540') {
+        window.__omResLock = base;
+        window.__omResLockAt = Date.now();
+      }
+      window.__omAudioOn = true;
+      window.__omWantResTries = 0;
+      window.__omWantRes = 'audio';
+    } else if (window.__omAudioOn) {
+      window.__omAudioOn = false;
+      window.__omWantResTries = 0;
+      window.__omWantRes = window.__omAudioPrev || '1080';
+    }
+  };
+  function qText(el){ return ((el.textContent || '') + '').trim().toUpperCase(); }
+  function qHit(want, t){
+    if (!t || t.length > 12) return false;
+    if (want === '1080') return t.indexOf('1080P') >= 0 || t === '蓝光';
+    if (want === '720')  return t.indexOf('720P') >= 0 || t === '超清' || t === '准高清';
+    if (want === '540')  return t.indexOf('540P') >= 0 || t === '高清' || t === '标清';
+    if (want === 'audio') return t.indexOf('音频') >= 0 || t.indexOf('AUDIO') >= 0;
+    return false;
+  }
+  function qItems(){
+    var out = [];
+    var nodes = document.querySelectorAll('[id^="resolution_item_"]');
+    for (var i=0;i<nodes.length;i++){
+      var t = qText(nodes[i]);
+      if (t && t.length <= 12) out.push(nodes[i]);
+    }
+    if (out.length) return out;
+    // 回退：全页文本扫描（ID 规则变化时兜底）
+    var all = [];
+    collectAll(document, ['div','span','li','button','a','p'], all);
+    for (var j=0;j<all.length;j++){
+      var el = all[j];
+      if (el.children && el.children.length > 3) continue;
+      var tt = qText(el);
+      if (!tt || tt.length > 12) continue;
+      if (!/(蓝光|超清|高清|标清|流畅|音频)|(^[1-9]\\d{2,3}P$)/.test(tt)) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function qFind(want, list){
+    for (var i=0;i<list.length;i++){ if (qHit(want, qText(list[i]))) return list[i]; }
+    return null;
+  }
+  function qClick(el){
+    if (!el) return;
+    var o = {bubbles:true, cancelable:true, view:window};
+    try { el.dispatchEvent(new PointerEvent('pointerdown', o)); } catch(e){}
+    try { el.dispatchEvent(new MouseEvent('mousedown', o)); } catch(e){}
+    try { el.dispatchEvent(new MouseEvent('mouseup', o)); } catch(e){}
+    try { el.click(); } catch(e){}
+  }
+  function wakePlayer(){
+    var pl = document.querySelector('#player') || document.querySelector('video');
+    if (!pl) return;
+    var o = {bubbles:true, cancelable:true, view:window,
+             clientX:(window.innerWidth/2)|0, clientY:(window.innerHeight/2)|0};
+    try { pl.dispatchEvent(new MouseEvent('mousemove', o)); } catch(e){}
+    try { pl.dispatchEvent(new MouseEvent('mousedown', o)); } catch(e){}
+    try { pl.dispatchEvent(new MouseEvent('mouseup', o)); } catch(e){}
+    try { pl.dispatchEvent(new MouseEvent('click', o)); } catch(e){}
   }
   function trySwitchRes(){
     var want = window.__omWantRes;
+    // 保持清晰度：窗口缩放到画中画、播放器重载后站点会自行降档，
+    // 发现实际档位与锁定档不符就切回（听电视的音频档期间不干预）
+    if (!want && window.__omResLock && !window.__omAudioOn
+        && document.querySelector('[id^="resolution_item_"]')) {
+      var lh = __omVideoH();
+      if (lh >= 400) {
+        var lt = lh >= 1000 ? '1080'
+          : (lh >= 700 ? '720' : (lh >= 500 ? '540' : ''));
+        var lockNow = Date.now();
+        if (lt && lt !== window.__omResLock
+            && lockNow - (window.__omResLockAt || 0) > 10000) {
+          window.__omResLockAt = lockNow;
+          window.__omWantResTries = 0;
+          want = window.__omWantRes = window.__omResLock;
+        }
+      }
+    }
     if (!want) return;
     window.__omWantResTries = (window.__omWantResTries || 0) + 1;
-    if (window.__omWantResTries > 8) { window.__omWantRes = null; return; }
-    var targetH = want === '1080' ? 1080 : (want === '720' ? 720 : 540);
-    // 已经是目标清晰度：直接结束
-    var vs0 = allVideos(document);
-    for (var i0=0;i0<vs0.length;i0++){
-      var vh = vs0[i0].videoHeight || 0;
-      if (vh > 0 && Math.abs(vh - targetH) < 180) {
-        window.__omWantRes = null;
-        return;
-      }
-    }
-    var labels = want === '1080' ? ['1080P','1080','高清']
-        : (want === '720' ? ['720P','720','准高清'] : ['540P','540','标清']);
-    var els = [];
-    collectAll(document, ['button','li','span','div','a'], els);
-    var hit = null;
-    for (var j=0;j<els.length;j++){
-      var t = resText(els[j]);
-      if (t.length === 0 || t.length > 14) continue;
-      for (var k=0;k<labels.length;k++){
-        if (t === labels[k] || t.indexOf(labels[k]) === 0) { hit = els[j]; break; }
-      }
-      if (hit) break;
-    }
-    if (!hit) return;
-    // 隐藏元素也能收到合成 click：命中清晰度入口时先点开菜单，
-    // 保留 __omWantRes 让下一轮点到已渲染出的选项
-    if (!hit.offsetParent) {
-      try { hit.click(); } catch(e){}
+    if (window.__omWantResTries > 14) { window.__omWantRes = null; return; }
+    var list = qItems();
+    var hit = qFind(want, list);
+    if (hit) { qClick(hit); window.__omWantRes = null; return; }
+    // 该频道没有「音频」档：确认 3 秒后放弃，避免反复点开清晰度菜单
+    if (want === 'audio' && list.length > 0) {
+      if (window.__omWantResTries >= 3) window.__omWantRes = null;
+      else wakePlayer();
       return;
     }
-    try { hit.click(); } catch(e){}
-    window.__omWantRes = null;
+    var h = __omVideoH();
+    var cur = h >= 1000 ? '1080' : (h >= 700 ? '720' : (h >= 500 ? '540' : ''));
+    // 已经是目标分辨率：直接结束
+    if (want !== 'audio' && cur === want) { window.__omWantRes = null; return; }
+    // 菜单未展开：先唤出控制栏，再点「当前档」把清晰度菜单展开
+    if (window.__omWantResTries % 3 === 1) wakePlayer();
+    var opener = cur ? qFind(cur, list) : null;
+    if (!opener) opener = qFind('1080', list) || qFind('720', list) || qFind('540', list);
+    if (opener) qClick(opener);
   }
-  setInterval(trySwitchRes, 1500);
+  setInterval(trySwitchRes, 1000);
   var lastMM = 0;
   function onMouseMove(){
     var n = Date.now();

@@ -33,6 +33,7 @@ import 'web_env.dart';
 import 'web_launch.dart';
 import 'network_monitor.dart';
 import 'osd_bus.dart';
+import 'pip.dart';
 import 'yangshipin_epg.dart';
 
 /// 播放器状态
@@ -197,12 +198,47 @@ class PlayerController extends ChangeNotifier {
     await _loadSettings();
     await reservationManager.init(_onReservationTriggered);
 
+    // 画中画状态由原生回调：用户从浮窗恢复全屏后要撤掉小窗状态
+    listenPipState((active) {
+      // 进出画中画窗口尺寸会变，站点可能按窗口大小自行降档：
+      // 重新下发用户锁定的清晰度，保证切到哪档就保持哪档
+      _applyWebResolution();
+      if (_pipActive == active) return;
+      _pipActive = active;
+      if (!active) _miniWindow = false;
+      notifyListeners();
+    });
+
+    // 安卓通知栏「音频播放」卡片的按钮命令（原生广播 → MethodChannel）
+    listenAudioCommands((cmd) async {
+      switch (cmd) {
+        case 'playpause':
+          await togglePlayPause();
+          break;
+        case 'prev':
+          await previousChannel();
+          break;
+        case 'next':
+          await nextChannel();
+          break;
+        case 'stop':
+        case 'restore':
+          // 关闭音频模式 / 点卡片回 App：原生已把窗口拉回前台
+          await exitListenMode();
+          break;
+      }
+      // 仍在听电视则刷新卡片（切台/暂停后节目信息变了）
+      if (_listenMode) _notifyListenCard(force: true);
+    });
+
     // 启动网络监控：开机启动时可能网络未就绪，需要检测并重试
     NetworkMonitor.instance.start();
     NetworkMonitor.instance.onNetworkChanged.listen(_onNetworkChanged);
     // 播放中每 500ms 刷新一次（进度条、倒计时等）
     _tickTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       _checkCastStall();
+      // 听电视：节目切换或播放/暂停变化时同步通知栏卡片
+      if (_listenMode) _notifyListenCard();
       if (_videoController != null &&
           _videoController!.value.isInitialized) {
         notifyListeners();
@@ -887,6 +923,8 @@ class PlayerController extends ChangeNotifier {
     _applyWebBrightness();
     // 把当前清晰度档位同步给站点（页面已加载时立即生效）
     _applyWebResolution();
+    // 听电视状态下重建的网页同样要落回官方「音频」档
+    _applyWebAudio(_listenMode);
   }
 
   void _applyWebResolution() {
@@ -895,7 +933,27 @@ class PlayerController extends ChangeNotifier {
       '720P' => '720',
       _ => '540',
     };
+    if (_listenMode) {
+      // 听电视时页面锁在官方「音频」档：只更新退出后要还原的档位，不切视频
+      _webEval?.call(
+          "window.__omAudioPrev = '$level'; window.__omResLock = '$level'");
+      return;
+    }
     _webEval?.call("window.__omSetRes && window.__omSetRes('$level')");
+  }
+
+  /// 听电视：让央视频官方播放器切到「音频」档。
+  /// 该档是音画分离的纯音频流，比继续拉视频码率真正省流量；
+  /// 频道没有音频档时脚本会退化为只把 video 隐藏/静音，画面仍在后台。
+  void _applyWebAudio(bool on) {
+    final level = switch (_resolution) {
+      '1080P' => '1080',
+      '720P' => '720',
+      _ => '540',
+    };
+    _webEval?.call(on
+        ? "window.__omAudio && window.__omAudio(true, '$level')"
+        : 'window.__omAudio && window.__omAudio(false)');
   }
 
   /// 注销网页控制桥（WebView 销毁前）
@@ -925,6 +983,7 @@ class PlayerController extends ChangeNotifier {
     if (value) {
       _applyWebVolume();
       _applyWebResolution();
+      _applyWebAudio(_listenMode);
     }
     notifyListeners();
   }
@@ -1620,6 +1679,9 @@ class PlayerController extends ChangeNotifier {
     _listenMode = true;
     // 听电视下不显示播放层，隐藏光标（网页仍在后台播放声音）
     WinHotkeys().setCursorHide(false);
+    // 网页频道切到官方「音频」档：音画分离流，才是真正省流量
+    _applyWebAudio(true);
+    _notifyListenCard(force: true);
     if (isDesktop && _settings.listenModeHideWindow) {
       try {
         // 只最小化，保留任务栏图标：窗口最小化后本进程不再是前台，
@@ -1627,6 +1689,13 @@ class PlayerController extends ChangeNotifier {
         // （任务栏点击/Alt+Tab 恢复后再点卡片退出听电视）
         await windowManager.minimize();
       } catch (_) {}
+    } else if (!kIsWeb && _settings.listenModeHideWindow) {
+      // 安卓：先把「听电视」背景亮出来，再退到后台隐藏窗口（声音继续）。
+      // 延迟 1.2 秒是为了让用户看见背景卡片，而不是瞬间消失
+      Future.delayed(const Duration(milliseconds: 1200), () async {
+        if (!_listenMode) return;
+        await moveToBackground();
+      });
     }
     notifyListeners();
   }
@@ -1634,6 +1703,9 @@ class PlayerController extends ChangeNotifier {
   Future<void> exitListenMode() async {
     if (!_listenMode) return;
     _listenMode = false;
+    // 退出音频档，画面恢复
+    _applyWebAudio(false);
+    await stopListenCard();
     if (isDesktop) {
       try {
         await windowManager.restore();
@@ -1646,6 +1718,28 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> toggleListenMode() =>
       _listenMode ? exitListenMode() : enterListenMode();
+
+  /// 上一次下发给通知栏卡片的内容签名（避免每 500ms 重复调用原生）
+  String _listenCardSig = '';
+
+  /// 刷新安卓通知栏「音频播放」卡片（频道名 + 正在播节目 + 播放状态）。
+  /// 其它平台没有该通道，pip.dart 内部会静默忽略。
+  Future<void> _notifyListenCard({bool force = false}) async {
+    if (!_listenMode && !force) return;
+    final name = _currentChannel?.name ?? '';
+    final program = currentProgram?.title ?? '';
+    final playing = isPlaying;
+    final sig = '$name|$program|$playing';
+    if (!force && sig == _listenCardSig) return;
+    _listenCardSig = sig;
+    await audioNotify(name: name, program: program, playing: playing);
+  }
+
+  /// 退出听电视时撤掉通知栏卡片
+  Future<void> stopListenCard() async {
+    _listenCardSig = '';
+    await audioStop();
+  }
 
   /// 锁定：屏蔽误触（返回键/快捷键需先解锁）
   bool _locked = false;
@@ -1664,12 +1758,37 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 小窗播放：桌面端缩小真实窗口并置顶；移动端由播放页缩小视频层
+  /// 小窗播放：桌面端缩小真实窗口并置顶；安卓走系统画中画（浮窗）；
+  /// 画中画不可用（Android 7 及以下）时退回播放页内的缩小布局
   bool _miniWindow = false;
   bool get miniWindow => _miniWindow;
   Size _sizeBeforeMini = const Size(1280, 720);
 
+  /// 是否处于系统画中画浮窗
+  bool _pipActive = false;
+  bool get pipActive => _pipActive;
+
   Future<void> toggleMiniWindow() async {
+    if (!isDesktop) {
+      // 安卓/移动端：优先进系统画中画（其他应用的浮窗样式）
+      if (_pipActive) {
+        await exitPip();
+        _pipActive = false;
+        notifyListeners();
+        return;
+      }
+      if (_miniWindow) {
+        _miniWindow = false;
+        notifyListeners();
+        return;
+      }
+      final ok = await enterPip();
+      _pipActive = ok;
+      // 画中画失败时退回应用内小窗（老系统没有 PiP）
+      _miniWindow = !ok;
+      notifyListeners();
+      return;
+    }
     _miniWindow = !_miniWindow;
     if (isDesktop) {
       try {
@@ -1926,12 +2045,8 @@ class PlayerController extends ChangeNotifier {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kResolution, value);
     } catch (_) {}
-    final level = switch (value) {
-      '1080P' => '1080',
-      '720P' => '720',
-      _ => '540',
-    };
-    _webEval?.call("window.__omSetRes && window.__omSetRes('$level')");
+    // 统一走 _applyWebResolution：听电视时只更新还原档位，不打断音频流
+    _applyWebResolution();
     notifyListeners();
   }
 

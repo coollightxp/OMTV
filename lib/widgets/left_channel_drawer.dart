@@ -438,32 +438,46 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   }
 
   Widget _buildHeader() {
+    // 手机窄屏：标题被两个图标按钮挤到只剩几十逻辑像素，
+    // 「央视频道」会换行并把下面频道条压乱——收紧字号/内边距并强制单行省略
+    final narrow = MediaQuery.sizeOf(context).shortestSide < 700;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: EdgeInsets.symmetric(
+          horizontal: narrow ? 12 : 16, vertical: narrow ? 8 : 12),
       decoration: const BoxDecoration(
         border: Border(bottom: BorderSide(color: Colors.white12)),
       ),
       child: Row(
         children: [
-          const Icon(Icons.live_tv, color: Colors.white, size: 22),
-          const SizedBox(width: 10),
+          Icon(Icons.live_tv, color: Colors.white, size: narrow ? 18 : 22),
+          SizedBox(width: narrow ? 8 : 10),
           Expanded(
             child: Text(
               _selectedCategory == null ? '频道列表' : _selectedCategory!.name,
-              style: const TextStyle(
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 17,
+                fontSize: narrow ? 14 : 17,
                 fontWeight: FontWeight.bold,
               ),
             ),
           ),
           if (_selectedCategory != null)
             IconButton(
-              icon: const Icon(Icons.arrow_back, color: Colors.white70),
+              icon: Icon(Icons.arrow_back,
+                  color: Colors.white70, size: narrow ? 18 : 24),
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
               onPressed: () => setState(() => _selectedCategory = null),
             ),
           IconButton(
-            icon: const Icon(Icons.close, color: Colors.white70),
+            icon: Icon(Icons.close,
+                color: Colors.white70, size: narrow ? 18 : 24),
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
             onPressed: widget.onClose,
           ),
         ],

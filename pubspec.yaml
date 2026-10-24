@@ -67,5 +67,5 @@ flutter:
   uses-material-design: true
   assets:
     - branding/icon_1024.png
-    - branding/splash.jpg
+    - branding/splash.png
     - assets/logos/

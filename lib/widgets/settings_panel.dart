@@ -131,12 +131,10 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                   title: '听电视时隐藏窗口',
                                   subtitle: controller.isDesktop
                                       ? 'Windows 摸鱼模式：只保留声音，窗口最小化（点任务栏恢复）'
-                                      : '仅桌面端生效',
+                                      : '安卓：只留声音，应用退到后台，通知栏卡片可切台/退出',
                                   value: s.listenModeHideWindow,
-                                  onChanged: controller.isDesktop
-                                      ? (v) => controller.updateSettings(s
-                                          .copyWith(listenModeHideWindow: v))
-                                      : null,
+                                  onChanged: (v) => controller.updateSettings(
+                                      s.copyWith(listenModeHideWindow: v)),
                                 ),
                                 _switchTile(
                                   icon: Icons.music_note,
