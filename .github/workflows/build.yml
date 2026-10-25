@@ -19,7 +19,7 @@ jobs:
     # fvp 通过 FVP_DEPS_URL 覆盖默认 nightly 下载地址
     env:
       FVP_DEPS_URL: https://github.com/wang-bin/mdk-sdk/releases/download/v0.36.0
-      OMPLAYER_KEYSTORE: /home/runner/.android/omplayer.keystore
+      OMTV_KEYSTORE: /home/runner/.android/omtv.keystore
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -653,13 +653,13 @@ jobs:
         id: ks-cache
         uses: actions/cache@v4
         with:
-          path: /home/runner/.android/omplayer.keystore
-          key: omplayer-keystore-v4-${{ runner.os }}
+          path: /home/runner/.android/omtv.keystore
+          key: omtv-keystore-v4-${{ runner.os }}
 
       - name: Ensure stable keystore (validate secret; regenerate when corrupt)
         run: |
           set -e
-          KS="$HOME/.android/omplayer.keystore"
+          KS="$HOME/.android/omtv.keystore"
           mkdir -p "$HOME/.android"
           validate_ks() {
             keytool -list -keystore "$KS" -storepass android \
@@ -704,13 +704,13 @@ jobs:
       - name: Install Gradle init script (explicit release signing)
         run: |
           mkdir -p "$HOME/.gradle/init.d"
-          cat > "$HOME/.gradle/init.d/omplayer-signing.gradle" <<'GRADLE'
+          cat > "$HOME/.gradle/init.d/omtv-signing.gradle" <<'GRADLE'
           allprojects {
               afterEvaluate { p ->
                   if (p.plugins.hasPlugin('com.android.application')) {
-                      def ksPath = System.getenv('OMPLAYER_KEYSTORE')
+                      def ksPath = System.getenv('OMTV_KEYSTORE')
                       if (ksPath == null) {
-                          throw new GradleException('OMPLAYER_KEYSTORE env is not set')
+                          throw new GradleException('OMTV_KEYSTORE env is not set')
                       }
                       def ksFile = new File(ksPath)
                       if (!ksFile.isFile()) {
@@ -718,7 +718,7 @@ jobs:
                       }
                       def android = p.extensions.getByName('android')
                       def scs = android.signingConfigs
-                      def sc = scs.findByName('omplayerStable') ?: scs.create('omplayerStable')
+                      def sc = scs.findByName('omtvStable') ?: scs.create('omtvStable')
                       sc.storeFile = ksFile
                       sc.storePassword = 'android'
                       sc.keyAlias = 'androiddebugkey'
@@ -880,7 +880,7 @@ jobs:
           $f = 'windows/runner/main.cpp'
           $t = [System.IO.File]::ReadAllText($f)
           $inject1 = @(
-            '// ===== OMPlayer injected: single instance + one-shot NumLock restore =====',
+            '// ===== OMTV injected: single instance + one-shot NumLock restore =====',
             'static BOOL g_om_numlock_was_on = FALSE;',
             'static const wchar_t* kOmSingleInstanceMutex = L"Local\\OMTV_SingleInstance";',
             '// 一次性回调：触发后立刻 KillTimer，之后永不干预 NumLock，',
@@ -893,7 +893,7 @@ jobs:
             '    ::keybd_event(VK_NUMLOCK, 0x45, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);',
             '  }',
             '}',
-            '// ===== OMPlayer injected: WebView2 cache cleanup on startup =====',
+            '// ===== OMTV injected: WebView2 cache cleanup on startup =====',
             '// 启动时清空纯缓存目录（Cache/Code Cache/GPUCache/Service Worker），',
             '// 文件夹臃肿会拖慢 WebView2 启动；保留 Cookies/Local Storage 登录态',
             '#include <filesystem>',
@@ -916,18 +916,18 @@ jobs:
             'int APIENTRY wWinMain('
           ) -join "`r`n"
           $inject2 = @(
-            '  // OMPlayer: 允许内嵌 WebView2 无用户手势自动播放（带声音）。',
+            '  // OMTV: 允许内嵌 WebView2 无用户手势自动播放（带声音）。',
             '  // 必须在任何 WebView2 环境创建前设置，进程级生效；',
             '  // disk-cache-size 256MB，加速二次加载',
             '  ::SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",',
             '      L"--autoplay-policy=no-user-gesture-required --disk-cache-size=268435456");',
             '',
-            '  // OMPlayer: 在任何 WebView2 环境创建前清理磁盘缓存',
+            '  // OMTV: 在任何 WebView2 环境创建前清理磁盘缓存',
             '  OMClearWebView2Cache();',
             '',
             '  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);',
             '',
-            '  // OMPlayer: allow only one running instance',
+            '  // OMTV: allow only one running instance',
             '  HANDLE om_mutex = ::CreateMutexW(nullptr, TRUE, kOmSingleInstanceMutex);',
             '  (void)om_mutex; // hold for process lifetime; silences C4189 under /WX',
             '  if (::GetLastError() == ERROR_ALREADY_EXISTS) {',
@@ -945,7 +945,7 @@ jobs:
           $inject3 = @(
             '  window.SetQuitOnClose(true);',
             '',
-            '  // OMPlayer: 引擎初始化后 3 秒一次性恢复 NumLock 到启动前',
+            '  // OMTV: 引擎初始化后 3 秒一次性恢复 NumLock 到启动前',
             '  // 状态，回调内自行 KillTimer，之后不再干预用户按键',
             '  ::SetTimer(nullptr, 0x4F4D, 3000, OMNumLockRestore);'
           ) -join "`r`n"
@@ -961,7 +961,7 @@ jobs:
           # 窗口标题改为 OMTV（单实例 FindWindowW 也按此标题查找）
           $t = $t.Replace('L"omtv"', 'L"OMTV"')
           [System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($false)))
-          Get-Content $f | Select-String 'OMPlayer' | ForEach-Object { $_.Line.Trim() }
+          Get-Content $f | Select-String 'OMTV' | ForEach-Object { $_.Line.Trim() }
 
           # ===== flutter_window.cpp：数字键低级键盘钩子 + MethodChannel =====
           $fw = 'windows/runner/flutter_window.cpp'
@@ -973,7 +973,7 @@ jobs:
           }
           $wInc = @(
             '#include "flutter/generated_plugin_registrant.h"',
-            '// ===== OMPlayer injected: low-level hotkeys + idle cursor hide =====',
+            '// ===== OMTV injected: low-level hotkeys + idle cursor hide =====',
             '// WebView2 is a separate HWND: once it has keyboard focus Flutter',
             '// never receives WM_KEYDOWN, so hotkeys die. WH_KEYBOARD_LL forwards',
             '// digits and control keys to Dart while this process is foreground.',
@@ -1102,7 +1102,7 @@ jobs:
             '          if (is_down) {',
             '            const uint8_t msg = static_cast<uint8_t>(0x30 + digit);',
             '            ::FlutterDesktopMessengerSend(g_om_messenger,',
-            '                "omplayer/win_hotkeys", &msg, 1);',
+            '                "omtv/win_hotkeys", &msg, 1);',
             '          }',
             '        } else {',
             '          // "k:xxx" keydown, "u:xxx" keyup',
@@ -1111,7 +1111,7 @@ jobs:
             '                                    action);',
             '          if (n > 0) {',
             '            ::FlutterDesktopMessengerSend(g_om_messenger,',
-            '                "omplayer/win_hotkeys",',
+            '                "omtv/win_hotkeys",',
             '                reinterpret_cast<const uint8_t*>(buf),',
             '                static_cast<size_t>(n));',
             '          }',
@@ -1151,16 +1151,16 @@ jobs:
           ) -join "`r`n"
           $wReg = @(
             'RegisterPlugins(flutter_controller_->engine());',
-            '  // OMPlayer: hotkey channel (Dart side: omplayer/win_hotkeys)',
+            '  // OMTV: hotkey channel (Dart side: omtv/win_hotkeys)',
             '  // 3.44+: GetRegistrarForPlugin returns the C registrar ref; use the',
             '  // C messenger API directly (C++ MethodChannel impl is not shipped).',
             '  auto om_registrar =',
             '      flutter_controller_->engine()->GetRegistrarForPlugin(',
-            '          "OMPlayerHotkeys");',
+            '          "OMTVHotkeys");',
             '  g_om_messenger = ::FlutterDesktopPluginRegistrarGetMessenger(',
             '      om_registrar);',
             '  ::FlutterDesktopMessengerSetCallback(g_om_messenger,',
-            '      "omplayer/win_hotkeys", &OMMessengerCallback, nullptr);',
+            '      "omtv/win_hotkeys", &OMMessengerCallback, nullptr);',
             '  ::SetWindowsHookExW(WH_KEYBOARD_LL, &OMLowLevelKeyboardProc,',
             '                      ::GetModuleHandleW(nullptr), 0);',
             '  ::SetWindowsHookExW(WH_MOUSE_LL, &OMLowLevelMouseProc,',
