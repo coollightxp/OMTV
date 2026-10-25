@@ -124,12 +124,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.3';
+  static const String _appVersion = '1.0.4';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
   int _exitDialogFocusIndex = 0;
   bool _exitDialogOpen = false;
+
+  // 关机确认卡片：60 秒倒计时 + 取消/确认按钮，默认聚焦「取消」避免误关机
+  bool _shutdownDialogOpen = false;
+  int _shutdownFocusIndex = 0; // 0=取消, 1=确认关机
+  StateSetter? _shutdownRefresh;
+  int _shutdownCountdown = 60;
+  Timer? _shutdownTimer;
 
   // 投屏中按返回：第一次只提示，3 秒内再按一次才断开投屏，
   // 避免误触直接退出投屏（也可直接点面板上的「断开投屏」按钮）
@@ -857,9 +864,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
   /// 安卓返回键/遥控器返回处理（PopScope 拦截后调用）：
   /// 按层级关闭 设置→投屏→面板→全屏；都没有时弹退出确认
   Future<void> _handleBackPressed() async {
-    // 重入守卫：退出确认框已在显示时直接忽略，
+    // 重入守卫：退出确认框/关机确认卡片已在显示时直接忽略，
     // 防止连按返回弹出两个路由、关闭时连带弹掉播放器（黑屏）
-    if (_exitDialogOpen) return;
+    if (_exitDialogOpen || _shutdownDialogOpen) return;
     final c = context.read<PlayerController>();
     // 锁定状态：返回键只用于解锁（安卓系统返回走这里）
     if (c.locked) {
@@ -1025,14 +1032,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         _toggleListenMode();
         break;
       case 'shutdown':
-        final isWindows =
-            !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
-        _showOsd(
-          isWindows ? '5 秒后将关闭系统，可运行 shutdown /a 取消' : '即将关闭系统…',
-          icon: Icons.power_settings_new,
-          duration: const Duration(seconds: 5),
-        );
-        await shutdownSystem();
+        // 不再直接关机，先弹卡片确认（60 秒倒计时，默认聚焦「取消」）
+        await _showShutdownDialog();
         break;
     }
   }
@@ -1153,6 +1154,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         k == LogicalKeyboardKey.gameButtonA;
     final isLr = k == LogicalKeyboardKey.arrowLeft ||
         k == LogicalKeyboardKey.arrowRight;
+    // 关机确认卡片有独立按键逻辑，优先于退出框处理
+    if (_shutdownDialogOpen) {
+      return _handleShutdownDialogKey(k, isDown, isUp);
+    }
     // 退出确认对话框有遥控器友好界面，走专用逻辑
     if (_exitDialogOpen) {
       return _handleExitDialogKey(k, isDown, isUp);
@@ -1253,6 +1258,228 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
       return true;
     }
     return false;
+  }
+
+  /// 关机确认卡片：60 秒倒计时 + 取消/确认按钮，默认聚焦「取消」。
+  /// 倒计时到 0 自动执行关机；按返回/Esc/菜单键取消。
+  Future<void> _showShutdownDialog() async {
+    _shutdownFocusIndex = 0;
+    _shutdownCountdown = 60;
+    _shutdownDialogOpen = true;
+    // 启动倒计时：每秒减 1，到 0 自动确认关机；卡片关闭时取消
+    _shutdownTimer?.cancel();
+    _shutdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_shutdownDialogOpen) return;
+      if (_shutdownCountdown > 0) {
+        _shutdownCountdown--;
+        _shutdownRefresh?.call(() {});
+      }
+      if (_shutdownCountdown <= 0) {
+        _confirmShutdown(true);
+      }
+    });
+    final result = await showDialog<String?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            _shutdownRefresh = setDialogState;
+            // 按屏宽等比缩小，与退出框一致
+            final double panelScale =
+                (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.72, 1.0);
+            // PopScope 拦截系统返回键：返回键 = 取消关机，不直接 pop
+            return PopScope(
+              canPop: false,
+              onPopInvoked: (didPop) {
+                if (!didPop) _confirmShutdown(false);
+              },
+              child: Dialog(
+                backgroundColor: const Color(0xFF12151A),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Colors.white24),
+                ),
+                child: SizedBox(
+                  width: 360 * panelScale,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 30, vertical: 24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.power_settings_new,
+                                  color: Colors.orangeAccent, size: 26),
+                              const SizedBox(width: 8),
+                              const Text(
+                                '关机确认',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          const Text(
+                            '确认要关闭计算机吗？',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 15,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // 倒计时数字：大号显示，最后 10 秒变红
+                          Text(
+                            '$_shutdownCountdown',
+                            style: TextStyle(
+                              color: _shutdownCountdown <= 10
+                                  ? Colors.redAccent
+                                  : Colors.blueAccent,
+                              fontSize: 44,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const Text(
+                            '秒后自动关机',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _shutdownButton(
+                                label: '取消',
+                                color: Colors.white70,
+                                selected: _shutdownFocusIndex == 0,
+                                onTap: () => _confirmShutdown(false),
+                              ),
+                              const SizedBox(width: 18),
+                              _shutdownButton(
+                                label: '确认关机',
+                                color: Colors.orangeAccent,
+                                selected: _shutdownFocusIndex == 1,
+                                onTap: () => _confirmShutdown(true),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    _shutdownTimer?.cancel();
+    _shutdownTimer = null;
+    _shutdownDialogOpen = false;
+    _shutdownRefresh = null;
+    if (result == 'confirm' && mounted) {
+      await shutdownSystem();
+    }
+  }
+
+  /// 关机卡片里的一个按钮（取焦点由全局按键维护，不自建 FocusNode）。
+  Widget _shutdownButton({
+    required String label,
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) {
+        if (_shutdownFocusIndex != (label == '取消' ? 0 : 1)) {
+          _shutdownFocusIndex = label == '取消' ? 0 : 1;
+          _shutdownRefresh?.call(() {});
+        }
+      },
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? color.withOpacity(0.18) : Colors.white.withOpacity(0.04),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected ? color : Colors.white24,
+              width: selected ? 2.0 : 1.0,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? color : Colors.white70,
+              fontSize: 16,
+              fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 关机确认卡片按键处理：
+  /// ←/→ 在「取消」「确认关机」间切换；OK 确认当前选中；返回/Esc/菜单键 = 取消
+  bool _handleShutdownDialogKey(
+      LogicalKeyboardKey k, bool isDown, bool isUp) {
+    final isOk = k == LogicalKeyboardKey.select ||
+        k == LogicalKeyboardKey.enter ||
+        k == LogicalKeyboardKey.numpadEnter ||
+        k == LogicalKeyboardKey.gameButtonA;
+    final isLr = k == LogicalKeyboardKey.arrowLeft ||
+        k == LogicalKeyboardKey.arrowRight;
+    if (isOk) {
+      if (isDown && _shutdownDialogOpen) {
+        // 0=取消, 1=确认关机
+        _confirmShutdown(_shutdownFocusIndex == 1);
+      }
+      return true;
+    }
+    if (isLr) {
+      if (isDown) {
+        _shutdownFocusIndex = _shutdownFocusIndex == 0 ? 1 : 0;
+        _shutdownRefresh?.call(() {});
+      }
+      return true;
+    }
+    // 上下键消费掉，防止穿透切台
+    if (k == LogicalKeyboardKey.arrowUp ||
+        k == LogicalKeyboardKey.arrowDown) {
+      return true;
+    }
+    // 返回 / Esc / 菜单键 = 取消
+    if (k == LogicalKeyboardKey.contextMenu ||
+        k == LogicalKeyboardKey.escape) {
+      if (isDown && _shutdownDialogOpen) {
+        _confirmShutdown(false);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// 确认或取消关机：关闭卡片（自动触发倒计时取消），返回值决定是否执行关机
+  void _confirmShutdown(bool confirm) {
+    if (!_shutdownDialogOpen) return;
+    _shutdownDialogOpen = false;
+    _shutdownTimer?.cancel();
+    _shutdownTimer = null;
+    Navigator.of(context).pop<String?>(confirm ? 'confirm' : null);
   }
 
   /// 侧边面板（频道列表/EPG）是否有一个打开：打开期间方向键与 OK
