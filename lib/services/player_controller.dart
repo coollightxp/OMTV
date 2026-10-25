@@ -670,6 +670,9 @@ class PlayerController extends ChangeNotifier {
     _isCasting = false;
     // 投屏结束：分辨率回到直播电视台档位（左侧与右侧一致）
     _resetCastVideoSize();
+    // 立即刷新面板：左侧从投屏分辨率切回电视台档位、右侧恢复可用，
+    // 不依赖随后 playChannel 的初始化完成
+    notifyListeners();
     _seekCoalesceTimer?.cancel();
     _seekCoalesceTimer = null;
     _pendingSeekPos = null;

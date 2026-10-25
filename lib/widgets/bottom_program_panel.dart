@@ -202,28 +202,28 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                         });
                       }
                       return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // 清晰度菜单：面板内自绘，遥控器 ↑/↓ 选择、OK 确认
-                        if (_resMenuOpen && !c.isCasting) _buildResMenu(c),
-                        if (c.isSeekable) _buildSeekBar(c),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            _buildLogo(c, scale),
-                            SizedBox(width: scale < 1 ? 12 : 28),
-                            Expanded(child: _buildInfo(c, scale)),
-                            Flexible(
-                              flex: 0,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: _buildButtons(c),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // 清晰度菜单：面板内自绘，遥控器 ↑/↓ 选择、OK 确认
+                          if (_resMenuOpen && !c.isCasting) _buildResMenu(c),
+                          if (c.isSeekable) _buildSeekBar(c),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              _buildLogo(c, scale),
+                              SizedBox(width: scale < 1 ? 12 : 28),
+                              Expanded(child: _buildInfo(c, scale)),
+                              Flexible(
+                                flex: 0,
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerRight,
+                                  child: _buildButtons(c),
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ],
+                            ],
+                          ),
+                        ],
                       );
                     },
                   ),
