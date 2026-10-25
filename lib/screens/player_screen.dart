@@ -124,7 +124,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.5';
+  static const String _appVersion = '1.0.6';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -1293,71 +1293,78 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
             // 按屏宽等比缩小，与退出框一致
             final double panelScale =
                 (MediaQuery.sizeOf(ctx).width / 1280).clamp(0.72, 1.0);
-            return Dialog(
-              backgroundColor: const Color(0xFF12151A),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: const BorderSide(color: Colors.white24),
-              ),
-              child: SizedBox(
-                width: 360 * panelScale,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 30, vertical: 24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.power_settings_new,
-                                color: Colors.orangeAccent, size: 26),
-                            const SizedBox(width: 8),
-                            const Text(
-                              '关机倒计时',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
+            // Focus 自动抢占焦点：关机卡片从退出框弹出，中间退出框关闭时
+            // 焦点可能回到 WebView（平台视图不跟随 Flutter 焦点变化），
+            // 导致遥控器按键被 WebView 吞掉。autofocus 确保卡片打开时
+            // 焦点回到 Flutter，HardwareKeyboard 才能收到按键。
+            return Focus(
+              autofocus: true,
+              child: Dialog(
+                backgroundColor: const Color(0xFF12151A),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Colors.white24),
+                ),
+                child: SizedBox(
+                  width: 360 * panelScale,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 30, vertical: 24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.power_settings_new,
+                                  color: Colors.orangeAccent, size: 26),
+                              const SizedBox(width: 8),
+                              const Text(
+                                '关机倒计时',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        // 倒计时数字：大号显示，最后 10 秒变红
-                        Text(
-                          '$_shutdownCountdown',
-                          style: TextStyle(
-                            color: _shutdownCountdown <= 10
-                                ? Colors.redAccent
-                                : Colors.blueAccent,
-                            fontSize: 44,
-                            fontWeight: FontWeight.w700,
+                            ],
                           ),
-                        ),
-                        const SizedBox(height: 20),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _shutdownButton(
-                              label: '取消',
-                              color: Colors.white70,
-                              selected: _shutdownFocusIndex == 0,
-                              onTap: () => _confirmShutdown(false),
+                          const SizedBox(height: 16),
+                          // 倒计时数字：大号显示，最后 10 秒变红
+                          Text(
+                            '$_shutdownCountdown',
+                            style: TextStyle(
+                              color: _shutdownCountdown <= 10
+                                  ? Colors.redAccent
+                                  : Colors.blueAccent,
+                              fontSize: 44,
+                              fontWeight: FontWeight.w700,
                             ),
-                            const SizedBox(width: 18),
-                            _shutdownButton(
-                              label: '关机',
-                              color: Colors.orangeAccent,
-                              selected: _shutdownFocusIndex == 1,
-                              onTap: () => _confirmShutdown(true),
-                            ),
-                          ],
-                        ),
-                      ],
+                          ),
+                          const SizedBox(height: 20),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _shutdownButton(
+                                label: '取消',
+                                color: Colors.white70,
+                                selected: _shutdownFocusIndex == 0,
+                                onTap: () => _confirmShutdown(false),
+                              ),
+                              const SizedBox(width: 18),
+                              _shutdownButton(
+                                label: '关机',
+                                color: Colors.orangeAccent,
+                                selected: _shutdownFocusIndex == 1,
+                                onTap: () => _confirmShutdown(true),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -2550,6 +2557,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
           _menuHeld = false;
           _menuLongTimer?.cancel();
           _menuLongFired = false;
+        }
+        return;
+      }
+      // 关机确认卡片：←/→ 切换「取消」「关机」，OK 确认当前选中，
+      // 返回/菜单取消（与 _handleShutdownDialogKey 逻辑一致，原生钩子路径）
+      if (_shutdownDialogOpen) {
+        if (action == 'left' || action == 'right') {
+          _shutdownFocusIndex = _shutdownFocusIndex == 0 ? 1 : 0;
+          _shutdownRefresh?.call(() {});
+        } else if (action == 'ok') {
+          _confirmShutdown(_shutdownFocusIndex == 1);
+        } else if (action == 'back' || action == 'esc' || action == 'menu') {
+          _confirmShutdown(false);
         }
         return;
       }
