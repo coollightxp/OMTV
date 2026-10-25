@@ -34,7 +34,7 @@ import 'web_launch.dart';
 import 'network_monitor.dart';
 import 'osd_bus.dart';
 import 'pip.dart';
-import 'tvmao_epg.dart';
+import 'xmltv_epg.dart';
 import 'yangshipin_epg.dart';
 
 /// 播放器状态
@@ -68,16 +68,16 @@ class PlayerController extends ChangeNotifier {
   final ReservationManager reservationManager = ReservationManager();
   final MediaCaptureService captureService = MediaCaptureService();
 
-  /// 电视猫 EPG（主源：节目名与实际播出更对得上）
-  final TvmaoEpg tvmaoEpg = TvmaoEpg();
+  /// XMLTV 节目单（主源：单请求全量、格式稳定、节目比央视频准）
+  final XmltvEpg xmltvEpg = XmltvEpg();
 
-  /// 央视频 EPG（辅源：电视猫没有的频道/电视猫不可用时兜底）
+  /// 央视频 EPG（辅源：XMLTV 没有的频道/整源不可用时兜底）
   final YangshipinEpg epg = YangshipinEpg();
 
-  /// 本次运行中电视猫是否已被判定为整源不可用；
+  /// 本次运行中 XMLTV 是否已被判定为整源不可用；
   /// 一旦置位，后续所有刷新都只用央视频，避免反复等待超时
-  bool _tvmaoDown = false;
-  bool get tvmaoDown => _tvmaoDown;
+  bool _xmltvDown = false;
+  bool get xmltvDown => _xmltvDown;
 
   Timer? _epgRefreshTimer;
 
@@ -281,8 +281,8 @@ class PlayerController extends ChangeNotifier {
     // 频道/EPG 就绪后恢复上次退出时播放的频道
     await restoreLastChannel();
 
-    // 每 15 分钟增量刷新一次节目单：
-    // 电视猫按自身 30 分钟间隔刷新，央视频按 15 分钟补缺
+    // 每 15 分钟检查一次节目单：
+    // XMLTV 按自身 1 小时间隔重新下载，央视频按 15 分钟补缺
     _epgRefreshTimer = Timer.periodic(YangshipinEpg.refreshInterval, (_) {
       _loadAllEpg();
     });
@@ -292,9 +292,9 @@ class PlayerController extends ChangeNotifier {
 
   /// 拉取全部频道 EPG（失败不影响启动，静默忽略单个频道错误）。
   ///
-  /// 主辅双源：先抓电视猫（节目更对得上），只把电视猫缺失的频道
-  /// 交给央视频补；若电视猫整源不可用则本会话后续只用央视频。
-  /// 启动阶段一次性拉完，避免打开节目单时才转圈。
+  /// 主辅双源：先拉 XMLTV 全量节目单（一次请求覆盖大部分频道），
+  /// 只把 XMLTV 缺失的频道交给央视频补；若 XMLTV 整源不可用则本会话
+  /// 后续只用央视频。启动阶段一次性拉完，避免打开节目单时才转圈。
   Future<void> _loadAllEpg() async {
     _isLoadingEpg = true;
     notifyListeners();
@@ -308,19 +308,17 @@ class PlayerController extends ChangeNotifier {
     }
 
     try {
-      if (!_tvmaoDown) {
+      if (!_xmltvDown) {
+        // 整源下载失败/被墙不能拖住启动（内部已有 12 秒超时）
         try {
-          // 整源探测加超时保护：电视猫被墙/超时不能拖住启动
-          await tvmaoEpg
-              .refresh(pids, onProgress: progress)
-              .timeout(const Duration(seconds: 9), onTimeout: () => 0);
+          await xmltvEpg.refresh(onProgress: progress);
         } catch (_) {}
-        if (tvmaoEpg.isDown) _tvmaoDown = true;
+        if (xmltvEpg.isDown) _xmltvDown = true;
       }
-      // 电视猫已判定不可用：所有频道都改用央视频
-      final missing = _tvmaoDown
+      // XMLTV 已判定不可用：所有频道都改用央视频
+      final missing = _xmltvDown
           ? pids
-          : pids.where((p) => !tvmaoEpg.has(p)).toList();
+          : pids.where((p) => !xmltvEpg.has(p)).toList();
       if (missing.isNotEmpty) {
         await epg.refresh(missing, onProgress: progress);
       }
@@ -352,13 +350,13 @@ class PlayerController extends ChangeNotifier {
 
   /// 网络恢复：补加载启动时因无网未载入的节目单，并恢复播放
   Future<void> _onNetworkRestored() async {
-    // 启动时无网会把电视猫误判为不可用：此时两家都没有数据，
+    // 启动时无网会把 XMLTV 误判为不可用：此时两家都没有数据，
     // 允许网络恢复后重新探测一次主源
-    if (_tvmaoDown && tvmaoEpg.isEmpty) {
-      _tvmaoDown = false;
-      tvmaoEpg.resetDown();
+    if (_xmltvDown && xmltvEpg.isEmpty) {
+      _xmltvDown = false;
+      xmltvEpg.resetDown();
     }
-    if (epg.isEmpty && tvmaoEpg.isEmpty && !_isLoadingEpg) {
+    if (epg.isEmpty && xmltvEpg.isEmpty && !_isLoadingEpg) {
       _loadAllEpg();
     }
     if (_state == PlayerState.waitingForNetwork) {
@@ -2107,10 +2105,10 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== EPG & 节目信息 ====================
 
-  /// 取某频道的节目单：电视猫优先，缺失/整源不可用时用央视频
+  /// 取某频道的节目单：XMLTV 优先，缺失/整源不可用时用央视频
   List<EpgProgram> _programsFor(String pid) {
-    if (!_tvmaoDown) {
-      final t = tvmaoEpg.programsFor(pid);
+    if (!_xmltvDown) {
+      final t = xmltvEpg.programsFor(pid);
       if (t.isNotEmpty) return t;
     }
     return epg.programsFor(pid);
@@ -2924,7 +2922,7 @@ class PlayerController extends ChangeNotifier {
     WakelockPlus.disable();
     dlnaService.stop();
     _epgRefreshTimer?.cancel();
-    tvmaoEpg.dispose();
+    xmltvEpg.dispose();
     epg.dispose();
     reservationManager.dispose();
     clockVisible.dispose();

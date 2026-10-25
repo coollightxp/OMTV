@@ -124,7 +124,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.7';
+  static const String _appVersion = '1.0.8';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
