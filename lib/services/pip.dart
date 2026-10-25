@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 /// 安卓原生桥：系统画中画（浮窗）、退到后台、通知栏「音频播放」卡片。
 ///
 /// 原生实现由 CI 在 flutter create 生成 android/ 工程后写入
-/// （com.coollightxp.omplayer.MainActivity + AudioPlaybackService，
+/// （com.coollightxp.omtv.MainActivity + AudioPlaybackService，
 /// 并在 AndroidManifest 打开 supportsPictureInPicture / 前台服务权限）。
 /// 其它平台没有该通道，调用会抛 MissingPluginException，这里统一吞掉
 /// 并返回 false，调用方退回应用内小窗或前台听电视。

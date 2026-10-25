@@ -38,7 +38,7 @@ jobs:
           cache: true
 
       - name: Create Android project files
-        run: flutter create . --platforms=android --org com.coollightxp --project-name omplayer
+        run: flutter create . --platforms=android --org com.coollightxp --project-name omtv
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -52,7 +52,7 @@ jobs:
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
           # 应用名改为 欧米电视（flutter create 默认写 project-name）
-          sed -i 's|android:label="omplayer"|android:label="欧米电视"|' $MANIFEST
+          sed -i 's|android:label="omtv"|android:label="欧米电视"|' $MANIFEST
           # IPTV 源多为 http:// 明文地址，必须允许明文流量
           sed -i 's|<application|<application android:usesCleartextTraffic="true"|' $MANIFEST
           # 单实例：从图标再次启动时回到已有任务而不是新开进程
@@ -106,10 +106,10 @@ jobs:
           grep -q 'AudioPlaybackService' $MANIFEST || sed -i 's|</application>|    <service android:name=".AudioPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
           grep -q 'AudioPlaybackService' $MANIFEST || { echo "::error::音频前台服务未写入 AndroidManifest"; exit 1; }
           grep -q 'foregroundServiceType="mediaPlayback"' $MANIFEST || { echo "::error::前台服务缺少 mediaPlayback 类型"; exit 1; }
-          KS_DIR=android/app/src/main/kotlin/com/coollightxp/omplayer
+          KS_DIR=android/app/src/main/kotlin/com/coollightxp/omtv
           mkdir -p $KS_DIR
           cat > $KS_DIR/AudioPlaybackService.kt <<'KOTLIN'
-          package com.coollightxp.omplayer
+          package com.coollightxp.omtv
 
           import android.app.Notification
           import android.app.NotificationChannel
@@ -143,12 +143,12 @@ jobs:
                   const val CHANNEL_ID = "omtv_audio"
                   const val NOTIF_ID = 4101
 
-                  const val ACT_PLAY_PAUSE = "com.coollightxp.omplayer.ACTION_PLAY_PAUSE"
-                  const val ACT_PREV = "com.coollightxp.omplayer.ACTION_PREV"
-                  const val ACT_NEXT = "com.coollightxp.omplayer.ACTION_NEXT"
+                  const val ACT_PLAY_PAUSE = "com.coollightxp.omtv.ACTION_PLAY_PAUSE"
+                  const val ACT_PREV = "com.coollightxp.omtv.ACTION_PREV"
+                  const val ACT_NEXT = "com.coollightxp.omtv.ACTION_NEXT"
 
                   /** 服务 → Activity 的指令广播 */
-                  const val ACTION_CMD = "com.coollightxp.omplayer.AUDIO_CMD"
+                  const val ACTION_CMD = "com.coollightxp.omtv.AUDIO_CMD"
                   const val EXTRA_CMD = "cmd"
 
                   /** 已在运行：后续只更新内容，避免安卓 12+ 后台启动前台服务限制 */
@@ -425,7 +425,7 @@ jobs:
           }
           KOTLIN
           cat > $KS_DIR/MainActivity.kt <<'KOTLIN'
-          package com.coollightxp.omplayer
+          package com.coollightxp.omtv
 
           import android.Manifest
           import android.app.PictureInPictureParams
@@ -783,7 +783,7 @@ jobs:
           cache: true
 
       - name: Create Web project files
-        run: flutter create . --platforms=web --org com.coollightxp --project-name omplayer
+        run: flutter create . --platforms=web --org com.coollightxp --project-name omtv
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -795,10 +795,10 @@ jobs:
 
       - name: Patch Web title / manifest
         run: |
-          sed -i 's|<title>omplayer</title>|<title>OMTV</title>|' web/index.html
-          sed -i 's|content="omplayer"|content="OMTV"|' web/index.html
-          sed -i 's|"name": "omplayer"|"name": "OMTV"|' web/manifest.json
-          sed -i 's|"short_name": "omplayer"|"short_name": "OMTV"|' web/manifest.json
+          sed -i 's|<title>omtv</title>|<title>OMTV</title>|' web/index.html
+          sed -i 's|content="omtv"|content="OMTV"|' web/index.html
+          sed -i 's|"name": "omtv"|"name": "OMTV"|' web/manifest.json
+          sed -i 's|"short_name": "omtv"|"short_name": "OMTV"|' web/manifest.json
 
       - name: Install dependencies
         run: flutter pub get
@@ -843,7 +843,7 @@ jobs:
           cache: true
 
       - name: Create Windows project files
-        run: flutter create . --platforms=windows --org com.coollightxp --project-name omplayer
+        run: flutter create . --platforms=windows --org com.coollightxp --project-name omtv
 
       - name: Apply app icon (视频取景框)
         shell: pwsh
@@ -854,7 +854,7 @@ jobs:
         run: |
           $c = 'windows/CMakeLists.txt'
           $t = [System.IO.File]::ReadAllText($c)
-          $anchor = 'set(BINARY_NAME "omplayer")'
+          $anchor = 'set(BINARY_NAME "omtv")'
           if (-not $t.Contains($anchor)) {
             throw 'BINARY_NAME anchor not found, Flutter template may have changed'
           }
@@ -959,7 +959,7 @@ jobs:
           $t = $t.Replace($a2, $inject2)
           $t = $t.Replace($a3, $inject3)
           # 窗口标题改为 OMTV（单实例 FindWindowW 也按此标题查找）
-          $t = $t.Replace('L"omplayer"', 'L"OMTV"')
+          $t = $t.Replace('L"omtv"', 'L"OMTV"')
           [System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($false)))
           Get-Content $f | Select-String 'OMPlayer' | ForEach-Object { $_.Line.Trim() }
 
@@ -1248,11 +1248,11 @@ jobs:
           sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev
 
       - name: Create Linux project files
-        run: flutter create . --platforms=linux --org com.coollightxp --project-name omplayer
+        run: flutter create . --platforms=linux --org com.coollightxp --project-name omtv
 
       # 窗口标题沿用 flutter create 写入的工程名，改为 OMTV
       - name: Patch Linux window title
-        run: sed -i 's/"omplayer"/"OMTV"/g' linux/runner/my_application.cc
+        run: sed -i 's/"omtv"/"OMTV"/g' linux/runner/my_application.cc
 
       - name: Install dependencies
         run: flutter pub get
