@@ -34,6 +34,7 @@ import 'web_launch.dart';
 import 'network_monitor.dart';
 import 'osd_bus.dart';
 import 'pip.dart';
+import 'tvmao_epg.dart';
 import 'yangshipin_epg.dart';
 
 /// 播放器状态
@@ -67,8 +68,17 @@ class PlayerController extends ChangeNotifier {
   final ReservationManager reservationManager = ReservationManager();
   final MediaCaptureService captureService = MediaCaptureService();
 
-  /// 央视频 EPG（独立模块，后台定时刷新）
+  /// 电视猫 EPG（主源：节目名与实际播出更对得上）
+  final TvmaoEpg tvmaoEpg = TvmaoEpg();
+
+  /// 央视频 EPG（辅源：电视猫没有的频道/电视猫不可用时兜底）
   final YangshipinEpg epg = YangshipinEpg();
+
+  /// 本次运行中电视猫是否已被判定为整源不可用；
+  /// 一旦置位，后续所有刷新都只用央视频，避免反复等待超时
+  bool _tvmaoDown = false;
+  bool get tvmaoDown => _tvmaoDown;
+
   Timer? _epgRefreshTimer;
 
   // 启动初始化：先显示启动图，频道/EPG 就绪后再进入播放
@@ -271,7 +281,8 @@ class PlayerController extends ChangeNotifier {
     // 频道/EPG 就绪后恢复上次退出时播放的频道
     await restoreLastChannel();
 
-    // 每 15 分钟增量刷新一次节目单
+    // 每 15 分钟增量刷新一次节目单：
+    // 电视猫按自身 30 分钟间隔刷新，央视频按 15 分钟补缺
     _epgRefreshTimer = Timer.periodic(YangshipinEpg.refreshInterval, (_) {
       _loadAllEpg();
     });
@@ -279,21 +290,40 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 拉取全部频道 EPG（失败不影响启动，静默忽略单个频道错误）
+  /// 拉取全部频道 EPG（失败不影响启动，静默忽略单个频道错误）。
+  ///
+  /// 主辅双源：先抓电视猫（节目更对得上），只把电视猫缺失的频道
+  /// 交给央视频补；若电视猫整源不可用则本会话后续只用央视频。
+  /// 启动阶段一次性拉完，避免打开节目单时才转圈。
   Future<void> _loadAllEpg() async {
     _isLoadingEpg = true;
     notifyListeners();
+    final pids = YangshipinChannels.epgPids;
+    void progress(int done, int total) {
+      // 启动图撤下后不再刷新状态文案，避免后台补拉时整树重建
+      if (!_bootReady) {
+        _bootStatus = '正在获取节目单… $done/$total';
+        notifyListeners();
+      }
+    }
+
     try {
-      await epg.refresh(
-        YangshipinChannels.epgPids,
-        onProgress: (done, total) {
-          // 启动图撤下后不再刷新状态文案，避免后台补拉时整树重建
-          if (!_bootReady) {
-            _bootStatus = '正在获取节目单… $done/$total';
-            notifyListeners();
-          }
-        },
-      );
+      if (!_tvmaoDown) {
+        try {
+          // 整源探测加超时保护：电视猫被墙/超时不能拖住启动
+          await tvmaoEpg
+              .refresh(pids, onProgress: progress)
+              .timeout(const Duration(seconds: 9), onTimeout: () => 0);
+        } catch (_) {}
+        if (tvmaoEpg.isDown) _tvmaoDown = true;
+      }
+      // 电视猫已判定不可用：所有频道都改用央视频
+      final missing = _tvmaoDown
+          ? pids
+          : pids.where((p) => !tvmaoEpg.has(p)).toList();
+      if (missing.isNotEmpty) {
+        await epg.refresh(missing, onProgress: progress);
+      }
     } catch (_) {
     } finally {
       _isLoadingEpg = false;
@@ -322,7 +352,13 @@ class PlayerController extends ChangeNotifier {
 
   /// 网络恢复：补加载启动时因无网未载入的节目单，并恢复播放
   Future<void> _onNetworkRestored() async {
-    if (epg.isEmpty && !_isLoadingEpg) {
+    // 启动时无网会把电视猫误判为不可用：此时两家都没有数据，
+    // 允许网络恢复后重新探测一次主源
+    if (_tvmaoDown && tvmaoEpg.isEmpty) {
+      _tvmaoDown = false;
+      tvmaoEpg.resetDown();
+    }
+    if (epg.isEmpty && tvmaoEpg.isEmpty && !_isLoadingEpg) {
       _loadAllEpg();
     }
     if (_state == PlayerState.waitingForNetwork) {
@@ -2071,11 +2107,20 @@ class PlayerController extends ChangeNotifier {
 
   // ==================== EPG & 节目信息 ====================
 
+  /// 取某频道的节目单：电视猫优先，缺失/整源不可用时用央视频
+  List<EpgProgram> _programsFor(String pid) {
+    if (!_tvmaoDown) {
+      final t = tvmaoEpg.programsFor(pid);
+      if (t.isNotEmpty) return t;
+    }
+    return epg.programsFor(pid);
+  }
+
   /// 获取当前频道的 EPG（无真实数据时返回空，不使用模拟数据）
   List<EpgProgram> getCurrentEpg() {
     final ch = _currentChannel;
     if (ch == null) return const [];
-    return epg.programsFor(ch.tvgId.isNotEmpty ? ch.tvgId : ch.id);
+    return _programsFor(ch.tvgId.isNotEmpty ? ch.tvgId : ch.id);
   }
 
   /// 当前正在播放的节目
@@ -2091,7 +2136,7 @@ class PlayerController extends ChangeNotifier {
   /// 左侧频道列表用它显示每路的"正在播"小字
   String currentProgramTitleFor(Channel channel) {
     final now = DateTime.now();
-    for (final p in epg.programsFor(channel.tvgId.isNotEmpty ? channel.tvgId : channel.id)) {
+    for (final p in _programsFor(channel.tvgId.isNotEmpty ? channel.tvgId : channel.id)) {
       if (now.isAfter(p.startTime) && now.isBefore(p.endTime)) return p.title;
     }
     return '';
@@ -2879,6 +2924,7 @@ class PlayerController extends ChangeNotifier {
     WakelockPlus.disable();
     dlnaService.stop();
     _epgRefreshTimer?.cancel();
+    tvmaoEpg.dispose();
     epg.dispose();
     reservationManager.dispose();
     clockVisible.dispose();
