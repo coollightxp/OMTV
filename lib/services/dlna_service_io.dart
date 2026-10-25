@@ -131,7 +131,10 @@ class DlnaService {
           type: InternetAddressType.IPv4, includeLoopback: false);
       _ip = await _localIp();
       await _startSsdp();
-    } catch (_) {}
+      CastLog.write('SSDP started ip=$_ip port=$_port ifaces=${_ifaces.length}');
+    } catch (e) {
+      CastLog.write('SSDP start failed: $e');
+    }
 
     // 播放中每 2 秒向订阅者推送一次播放状态/进度，
     // 发送端（手机）就能实时显示播放位置、播放/暂停状态。
@@ -185,6 +188,7 @@ class DlnaService {
     _readyWatchTimer = null;
     _ssdp = null;
     _http = null;
+    _ssdpRestarting = false;
   }
 
   /// 启动起播确认监视：每 200ms 检查一次，状态变化即推送，
@@ -308,7 +312,16 @@ class DlnaService {
       if (!msg.toUpperCase().contains('M-SEARCH')) return;
       final st = _headerValue(msg, 'ST');
       if (st == null || st.isEmpty) return;
+      CastLog.write('SSDP M-SEARCH from ${dg.address.address}:${dg.port} st=$st');
       _respondSearch(dg.address, dg.port, st);
+    }, onError: (Object e) {
+      // 安卓上 WiFi 切换/系统回收会让 socket 静默失效：
+      // 之后 M-SEARCH 收不到、alive 发不出，设备"出现一会就掉"
+      CastLog.write('SSDP socket error: $e');
+      _restartSsdp();
+    }, onDone: () {
+      CastLog.write('SSDP socket closed unexpectedly');
+      _restartSsdp();
     });
     // 启动时主动通告存在，提高被投屏端发现的概率
     for (var i = 0; i < 3; i++) {
@@ -331,6 +344,37 @@ class DlnaService {
     return null;
   }
 
+  bool _ssdpRestarting = false;
+
+  /// SSDP socket 异常后自动重建：刷新网卡/IP、重新绑定组播、
+  /// 恢复 alive 通告。服务已停止（HTTP 关闭）时不再重建。
+  Future<void> _restartSsdp() async {
+    if (_ssdpRestarting || _http == null) return;
+    _ssdpRestarting = true;
+    CastLog.write('SSDP restarting');
+    try {
+      _aliveTimer?.cancel();
+      _aliveTimer = null;
+      try {
+        _ssdp?.close();
+      } catch (_) {}
+      _ssdp = null;
+      await Future.delayed(const Duration(seconds: 2));
+      if (_http == null) return; // 等待期间服务被停止
+      try {
+        _ifaces = await NetworkInterface.list(
+            type: InternetAddressType.IPv4, includeLoopback: false);
+        _ip = await _localIp();
+      } catch (_) {}
+      await _startSsdp();
+      CastLog.write('SSDP restarted ip=$_ip ifaces=${_ifaces.length}');
+    } catch (e) {
+      CastLog.write('SSDP restart failed: $e');
+    } finally {
+      _ssdpRestarting = false;
+    }
+  }
+
   void _respondSearch(InternetAddress addr, int port, String st) {
     final socket = _ssdp;
     if (socket == null) return;
@@ -349,7 +393,11 @@ class DlnaService {
           'CONFIGID.UPNP.ORG: 1\r\n'
           'ST: $stVal\r\n'
           'USN: $usn\r\n\r\n';
-      socket.send(resp.codeUnits, addr, port);
+      try {
+        socket.send(resp.codeUnits, addr, port);
+      } catch (e) {
+        CastLog.write('SSDP respond send failed: $e');
+      }
     }
 
     // 略微延迟回复，避免同网络设备风暴
@@ -422,7 +470,14 @@ class DlnaService {
           'BOOTID.UPNP.ORG: 1\r\n'
           'CONFIGID.UPNP.ORG: 1\r\n'
           'USN: ${e[1]}\r\n\r\n';
-      socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
+      try {
+        socket.send(pkt.codeUnits, InternetAddress('239.255.255.250'), 1900);
+      } catch (err) {
+        // 组播发送失败（socket 已被系统回收等）：记录并触发重建
+        CastLog.write('SSDP alive send failed: $err');
+        _restartSsdp();
+        return;
+      }
     }
   }
 

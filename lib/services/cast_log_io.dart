@@ -19,7 +19,14 @@ class CastLog {
   static Future<String> path() async {
     if (_path != null) return _path!;
     try {
-      final dir = await getApplicationSupportDirectory();
+      // 安卓写到应用专属外部目录（/sdcard/Android/data/<pkg>/files），
+      // 无需额外权限，文件管理器/USB 即可读回诊断日志；
+      // 其它平台沿用应用支持目录。
+      Directory? dir;
+      if (Platform.isAndroid) {
+        dir = await getExternalStorageDirectory();
+      }
+      dir ??= await getApplicationSupportDirectory();
       _path = '${dir.path}${Platform.pathSeparator}dlna_cast.log';
     } catch (_) {
       _path = '';
