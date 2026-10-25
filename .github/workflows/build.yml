@@ -38,7 +38,7 @@ jobs:
           cache: true
 
       - name: Create Android project files
-        run: flutter create . --platforms=android --project-name omplayer
+        run: flutter create . --platforms=android --org com.coollightxp --project-name omplayer
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -100,13 +100,16 @@ jobs:
           # 听电视退后台后要保持 CPU 不休眠，否则网页音频会停
           grep -q 'android.permission.WAKE_LOCK' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' $MANIFEST
           grep -q 'android.permission.WAKE_LOCK' $MANIFEST || { echo "::error::唤醒锁权限未写入 AndroidManifest"; exit 1; }
+          # DLNA/SSDP 依赖组播：不声明该权限安卓会过滤组播包，手机扫描不到设备
+          grep -q 'CHANGE_WIFI_MULTICAST_STATE' $MANIFEST || sed -i 's|<application|<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />\n    <application|' $MANIFEST
+          grep -q 'CHANGE_WIFI_MULTICAST_STATE' $MANIFEST || { echo "::error::组播权限未写入 AndroidManifest"; exit 1; }
           grep -q 'AudioPlaybackService' $MANIFEST || sed -i 's|</application>|    <service android:name=".AudioPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>|' $MANIFEST
           grep -q 'AudioPlaybackService' $MANIFEST || { echo "::error::音频前台服务未写入 AndroidManifest"; exit 1; }
           grep -q 'foregroundServiceType="mediaPlayback"' $MANIFEST || { echo "::error::前台服务缺少 mediaPlayback 类型"; exit 1; }
-          KS_DIR=android/app/src/main/kotlin/com/example/omplayer
+          KS_DIR=android/app/src/main/kotlin/com/coollightxp/omplayer
           mkdir -p $KS_DIR
           cat > $KS_DIR/AudioPlaybackService.kt <<'KOTLIN'
-          package com.example.omplayer
+          package com.coollightxp.omplayer
 
           import android.app.Notification
           import android.app.NotificationChannel
@@ -140,12 +143,12 @@ jobs:
                   const val CHANNEL_ID = "omtv_audio"
                   const val NOTIF_ID = 4101
 
-                  const val ACT_PLAY_PAUSE = "com.example.omplayer.ACTION_PLAY_PAUSE"
-                  const val ACT_PREV = "com.example.omplayer.ACTION_PREV"
-                  const val ACT_NEXT = "com.example.omplayer.ACTION_NEXT"
+                  const val ACT_PLAY_PAUSE = "com.coollightxp.omplayer.ACTION_PLAY_PAUSE"
+                  const val ACT_PREV = "com.coollightxp.omplayer.ACTION_PREV"
+                  const val ACT_NEXT = "com.coollightxp.omplayer.ACTION_NEXT"
 
                   /** 服务 → Activity 的指令广播 */
-                  const val ACTION_CMD = "com.example.omplayer.AUDIO_CMD"
+                  const val ACTION_CMD = "com.coollightxp.omplayer.AUDIO_CMD"
                   const val EXTRA_CMD = "cmd"
 
                   /** 已在运行：后续只更新内容，避免安卓 12+ 后台启动前台服务限制 */
@@ -422,7 +425,7 @@ jobs:
           }
           KOTLIN
           cat > $KS_DIR/MainActivity.kt <<'KOTLIN'
-          package com.example.omplayer
+          package com.coollightxp.omplayer
 
           import android.Manifest
           import android.app.PictureInPictureParams
@@ -443,6 +446,9 @@ jobs:
           class MainActivity : FlutterActivity() {
               private var channel: MethodChannel? = null
 
+              /** DLNA/SSDP 组播锁（见 acquireMulticastLock） */
+              private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
               /** 听电视卡片按钮：原生广播 → Flutter（activity 退到后台也保持注册） */
               private val audioCmdReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -454,6 +460,31 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   ensureNotificationPermission()
+                  acquireMulticastLock()
+              }
+
+              /** DLNA/SSDP 组播锁：安卓默认过滤组播包（尤其 WiFi 省电模式），
+               *  不持锁时投屏端 M-SEARCH/NOTIFY 可能收不到，表现为“扫描不到”
+               *  或隔一段时间才扫描到。锁跟随 Activity 生命周期，退出即释放。 */
+              private fun acquireMulticastLock() {
+                  try {
+                      if (multicastLock != null) return
+                      val wm = applicationContext.getSystemService(Context.WIFI_SERVICE)
+                          as? android.net.wifi.WifiManager ?: return
+                      val lock = wm.createMulticastLock("omtv_dlna")
+                      lock.setReferenceCounted(false)
+                      lock.acquire()
+                      multicastLock = lock
+                  } catch (_: Exception) {
+                  }
+              }
+
+              private fun releaseMulticastLock() {
+                  try {
+                      multicastLock?.release()
+                  } catch (_: Exception) {
+                  }
+                  multicastLock = null
               }
 
               /** 是否电视端：盒子/电视没有可操作的通知栏，不需要通知权限 */
@@ -594,6 +625,7 @@ jobs:
                       unregisterReceiver(audioCmdReceiver)
                   } catch (_: Exception) {
                   }
+                  releaseMulticastLock()
                   super.onDestroy()
               }
 
@@ -751,7 +783,7 @@ jobs:
           cache: true
 
       - name: Create Web project files
-        run: flutter create . --platforms=web --project-name omplayer
+        run: flutter create . --platforms=web --org com.coollightxp --project-name omplayer
 
       - name: Apply app icon (视频取景框)
         run: |
@@ -811,7 +843,7 @@ jobs:
           cache: true
 
       - name: Create Windows project files
-        run: flutter create . --platforms=windows --project-name omplayer
+        run: flutter create . --platforms=windows --org com.coollightxp --project-name omplayer
 
       - name: Apply app icon (视频取景框)
         shell: pwsh
@@ -1216,7 +1248,7 @@ jobs:
           sudo apt-get install -y ninja-build libgtk-3-dev libasound2-dev pkg-config libwebkit2gtk-4.0-dev libsoup-3.0-dev
 
       - name: Create Linux project files
-        run: flutter create . --platforms=linux --project-name omplayer
+        run: flutter create . --platforms=linux --org com.coollightxp --project-name omplayer
 
       # 窗口标题沿用 flutter create 写入的工程名，改为 OMTV
       - name: Patch Linux window title

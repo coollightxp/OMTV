@@ -192,11 +192,20 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                       ? const EdgeInsets.fromLTRB(6, 16, 4, 14)
                       : const EdgeInsets.fromLTRB(22, 16, 18, 10),
                   child: Consumer<PlayerController>(
-                    builder: (context, c, _) => Column(
+                    builder: (context, c, _) {
+                      // 投屏中右侧清晰度不可用：已打开的菜单同步收起
+                      if (c.isCasting && _resMenuOpen) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted && _resMenuOpen) {
+                            setState(() => _resMenuOpen = false);
+                          }
+                        });
+                      }
+                      return Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         // 清晰度菜单：面板内自绘，遥控器 ↑/↓ 选择、OK 确认
-                        if (_resMenuOpen) _buildResMenu(c),
+                        if (_resMenuOpen && !c.isCasting) _buildResMenu(c),
                         if (c.isSeekable) _buildSeekBar(c),
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
@@ -215,7 +224,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
                           ],
                         ),
                       ],
-                    ),
+                      );
+                    },
                   ),
                 ),
               ),
@@ -263,8 +273,13 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   // ==================== 节目信息 ====================
 
   String _resolutionLabel(PlayerController c) {
-    final actual = c.actualResolutionLabel;
-    return actual.isNotEmpty ? actual : c.resolution;
+    // 投屏中：左侧显示投过来的视频自身的分辨率（由内核上报的实际尺寸），
+    // 与右侧直播电视台档位无关；断开后自动回到电视台档位
+    if (c.isCasting) {
+      final cast = c.castResolutionLabel;
+      return cast.isNotEmpty ? cast : '投屏中';
+    }
+    return c.resolution;
   }
 
   Widget _buildInfo(PlayerController c, double scale) {
@@ -405,7 +420,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         'resolution',
         null,
         '清晰度',
-        hasChannel ? () => _openResolutionMenu(c) : null,
+        // 投屏中清晰度不可用（投屏画面分辨率由发送端视频决定）
+        hasChannel && !c.isCasting ? () => _openResolutionMenu(c) : null,
         // 打开菜单后面板要留着（菜单在面板内），不能按 OK 就收起
         dismiss: false,
       ),
@@ -437,7 +453,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   }
 
   Widget _resolutionButton(PlayerController c, _KbAction a) {
-    final label = _resolutionLabel(c);
+    // 右侧按钮代表直播电视台的清晰度档位（投屏时置灰但仍显示当前档位）
+    final label = c.resolution;
     final selected = _kbId == a.id;
     return _wrapSelected(
       selected,

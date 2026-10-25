@@ -113,10 +113,17 @@ class PlayerController extends ChangeNotifier {
   int _lastBufferedEndMs = -1;
 
   // 最后确认可播的位置（ms）：看门狗在「非缓冲、非宽限、位置推进」时更新。
-  // seek 后下载完全停滞时软回退到这里（重建=重发同一 Range 请求照样挂死）
+  // 投屏位置冻结在 seek 目标时，据此判断冻结点是否远离此前实际播放的位置
   int _lastGoodPosMs = -1;
   // 本次停滞是否已用过软回退（防止在死位置之间来回弹跳）
   bool _seekFallbackUsed = false;
+
+  // 投屏 seek 节流：发送端（抖音/乐播 SDK）建连后会连发几十上百条 Seek
+  // 做进度同步，逐条下给内核会让 CDN 反复中断 Range 请求（实测 0.6 秒内
+  // 42 条），播放随即冻结。这里合并为「最多 500ms 一次、始终取最新目标」
+  Timer? _seekCoalesceTimer;
+  Duration? _pendingSeekPos;
+  DateTime? _lastCastSeekAt;
 
   // 有声无画面看门狗：音频在播但视频尺寸长时间为 0（解码链视频轨没起来）
   DateTime? _noVideoSince;
@@ -614,6 +621,12 @@ class PlayerController extends ChangeNotifier {
             ? null
             : _currentChannel;
     _isCasting = true;
+    // 新投屏：清掉上一场残留的分辨率与合并中的 seek
+    _resetCastVideoSize();
+    _seekCoalesceTimer?.cancel();
+    _seekCoalesceTimer = null;
+    _pendingSeekPos = null;
+    _lastCastSeekAt = null;
     // 重置卡顿看门狗
     _watchPosMs = -1;
     _watchAdvanceAt = null;
@@ -655,6 +668,12 @@ class PlayerController extends ChangeNotifier {
   Future<void> _doStopCastAndRestore() async {
     if (!_isCasting) return;
     _isCasting = false;
+    // 投屏结束：分辨率回到直播电视台档位（左侧与右侧一致）
+    _resetCastVideoSize();
+    _seekCoalesceTimer?.cancel();
+    _seekCoalesceTimer = null;
+    _pendingSeekPos = null;
+    _lastCastSeekAt = null;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     unawaited(CastStreamProxy.instance.stop());
@@ -1603,6 +1622,16 @@ class PlayerController extends ChangeNotifier {
     // 只处理当前 controller 的事件，旧实例的迟到事件一律忽略
     if (!identical(self, _videoController)) return;
     final v = self.value;
+    // 投屏视频分辨率：随视频实际尺寸变化更新底部面板左侧标签
+    if (_isCasting && v.isInitialized) {
+      final w = v.size.width.round();
+      final h = v.size.height.round();
+      if (w > 0 && h > 0 && (w != _castVideoWidth || h != _castVideoHeight)) {
+        _castVideoWidth = w;
+        _castVideoHeight = h;
+        notifyListeners();
+      }
+    }
     if (v.hasError) {
       if (_isCasting) {
         // 投屏只有一个源，出错基本意味着流真的断了（直播间关播/CDN 掐流）。
@@ -2162,6 +2191,28 @@ class PlayerController extends ChangeNotifier {
   int get webVideoWidth => _webVideoWidth;
   int get webVideoHeight => _webVideoHeight;
 
+  /// 投屏视频的实际尺寸（内核上报），投屏中左侧分辨率以它为准
+  int _castVideoWidth = 0;
+  int _castVideoHeight = 0;
+  int get castVideoWidth => _castVideoWidth;
+  int get castVideoHeight => _castVideoHeight;
+
+  /// 投屏视频的分辨率标签（如 1080P）；未投屏或尺寸未知时返回空串
+  String get castResolutionLabel {
+    final h = _castVideoHeight;
+    if (h <= 0) return '';
+    if (h >= 1800) return '4K';
+    if (h >= 1000) return '1080P';
+    if (h >= 700) return '720P';
+    if (h >= 480) return '540P';
+    return '${h}P';
+  }
+
+  void _resetCastVideoSize() {
+    _castVideoWidth = 0;
+    _castVideoHeight = 0;
+  }
+
   /// 注入脚本回传的实际视频尺寸
   void reportWebVideoSize(int width, int height) {
     if (width <= 0 || height <= 0) return;
@@ -2199,6 +2250,9 @@ class PlayerController extends ChangeNotifier {
 
   /// 切换清晰度：持久化并对当前网页频道生效
   Future<void> setResolution(String value) async {
+    // 投屏中右侧清晰度不可用：投屏画面分辨率由发送端视频决定，
+    // 不能套用直播电视台的档位
+    if (_isCasting) return;
     _resolution = value;
     try {
       final p = await SharedPreferences.getInstance();
@@ -2258,6 +2312,12 @@ class PlayerController extends ChangeNotifier {
           'seekTo(${position.inSeconds}s) IGNORED rawDur=${rawDur.inSeconds}s (live/unknown)');
       return;
     }
+    // 投屏 seek 合并：发送端建连后会连发几十条 Seek（实测 0.6 秒 42 条），
+    // 逐条下给内核会让 CDN 反复中断 Range 请求导致冻结，见 _queueCastSeek
+    if (_isCasting) {
+      _queueCastSeek(position, rawDur);
+      return;
+    }
     CastLog.write('seekTo(${position.inSeconds}s) dur=${rawDur.inSeconds}s');
     await _videoController?.seekTo(position);
     CastLog.write('seekTo(${position.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
@@ -2272,6 +2332,38 @@ class PlayerController extends ChangeNotifier {
     // 缓冲增长豁免（见 _checkCastStall），慢速下载不受影响。
     _seekGraceUntil = DateTime.now().add(const Duration(seconds: 30));
     notifyListeners();
+  }
+
+  /// 投屏 seek 节流：500ms 内最多落一次，且总是取最新目标。
+  /// 发送端（抖音/乐播 SDK）建连后会连续下发大量 Seek 做进度同步，
+  /// 逐条执行会让内核不断中断上游 Range 请求、播放冻结在目标点。
+  void _queueCastSeek(Duration position, Duration rawDur) {
+    _pendingSeekPos = position;
+    if (_seekCoalesceTimer != null) return;
+    final last = _lastCastSeekAt;
+    var waitMs = 0;
+    if (last != null) {
+      final elapsed = DateTime.now().difference(last).inMilliseconds;
+      if (elapsed < 500) waitMs = 500 - elapsed;
+    }
+    _seekCoalesceTimer = Timer(Duration(milliseconds: waitMs), () async {
+      _seekCoalesceTimer = null;
+      final target = _pendingSeekPos;
+      _pendingSeekPos = null;
+      if (target == null || !_isCasting) return;
+      _lastCastSeekAt = DateTime.now();
+      CastLog.write(
+          'seekTo(${target.inSeconds}s) dur=${rawDur.inSeconds}s (coalesced)');
+      await _videoController?.seekTo(target);
+      CastLog.write(
+          'seekTo(${target.inSeconds}s) done pos=${_videoController?.value.position.inSeconds}s');
+      _watchPosMs = -1;
+      _watchAdvanceAt = null;
+      _stallNudged = false;
+      _lastBufferedEndMs = -1;
+      _seekGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+      notifyListeners();
+    });
   }
 
   /// 投屏卡顿看门狗（500ms 一次）。
@@ -2341,8 +2433,12 @@ class PlayerController extends ChangeNotifier {
             !_seekFallbackUsed &&
             _lastGoodPosMs >= 0 &&
             (posMs - _lastGoodPosMs).abs() > 5000) {
+          // 位置冻结在 seek 目标（CDN 对该断点的 Range 请求永不回数据）：
+          // 重建内核后从冻结点往后退 30 秒恢复——既避开挂死的断点，也不会
+          // 像旧逻辑那样一路退回片头（_lastGoodPosMs 可能停在几秒处）
           _seekFallbackUsed = true;
-          _triggerCastRecovery(resumePosMs: _lastGoodPosMs);
+          _triggerCastRecovery(
+              resumePosMs: posMs > 30000 ? posMs - 30000 : 0);
           return;
         }
         _triggerCastRecovery();
@@ -2914,6 +3010,7 @@ class PlayerController extends ChangeNotifier {
     _tickTimer?.cancel();
     _castRestoreTimer?.cancel();
     _castEndedTimer?.cancel();
+    _seekCoalesceTimer?.cancel();
     _resetWebRecording();
     if (_isRecording && _videoController != null) {
       fvpRecord(_videoController!, to: null);
