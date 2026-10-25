@@ -10,9 +10,10 @@ import 'cast_log.dart';
 /// 经本地代理后 HTTP 层完全由我们控制：
 /// - 每个请求使用全新连接（不复用可能被 CDN 挂起的连接）；
 /// - 首字节停滞 15 秒：未向内核输出过字节，换全新连接整请求重试（≤3 次）；
-/// - body 中途停滞 15 秒：直接断开，内核侧已开启的 avio.reconnect
+/// - body 中途停滞 30 秒：直接断开，内核侧已开启的 avio.reconnect
 ///   会携当前位置重新经代理发请求（同样拿到全新连接），等价于
-///   mpv 的断点续传行为。
+///   mpv 的断点续传行为。4K 高码率分片在弱网下 15 秒无块到达是常态，
+///   过早断开会让内核缓冲永远填不满（表现为投 4K 一会儿就退出）。
 class CastStreamProxy {
   CastStreamProxy._();
   static final CastStreamProxy instance = CastStreamProxy._();
@@ -91,7 +92,7 @@ class CastStreamProxy {
             req.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
           }
           await for (final chunk
-              in outResp.timeout(const Duration(seconds: 15))) {
+              in outResp.timeout(const Duration(seconds: 30))) {
             sent += chunk.length;
             req.response.add(chunk);
             await req.response.flush();

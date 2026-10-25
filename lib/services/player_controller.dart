@@ -103,8 +103,14 @@ class PlayerController extends ChangeNotifier {
   // seek 后给看门狗 30 秒宽限期：长视频 seek 到远处缓冲慢，期间 position
   // 暂时停在目标点不动，若按正常 12 秒计时会被误判为卡顿而触发重建
   DateTime? _seekGraceUntil;
-  // 整场投屏是否已重建过（所有自愈路径统一守门，只重建一次）
-  bool _castReinitDone = false;
+  // 上一次停滞后是否已重建过内核由 _castReinitCount 计数（见上方常量）
+  int _castReinitCount = 0;
+
+  /// 整场投屏允许的自愈重建次数。4K 等高码率流在带宽不足时缓冲
+  /// 零增长会持续很久，只允许 1 次重建就把慢速存活的流误判死掉；
+  /// 每次确认位置推进后计数清零（完全恢复），只有连续多次重建
+  /// 都毫无进展才真正断开。
+  static const int _maxCastReinits = 3;
 
   // buffering 持续超时自愈
   DateTime? _bufferingSince;
@@ -115,8 +121,6 @@ class PlayerController extends ChangeNotifier {
   // 最后确认可播的位置（ms）：看门狗在「非缓冲、非宽限、位置推进」时更新。
   // 投屏位置冻结在 seek 目标时，据此判断冻结点是否远离此前实际播放的位置
   int _lastGoodPosMs = -1;
-  // 本次停滞是否已用过软回退（防止在死位置之间来回弹跳）
-  bool _seekFallbackUsed = false;
 
   // 投屏 seek 节流：发送端（抖音/乐播 SDK）建连后会连发几十上百条 Seek
   // 做进度同步，逐条下给内核会让 CDN 反复中断 Range 请求（实测 0.6 秒内
@@ -631,13 +635,13 @@ class PlayerController extends ChangeNotifier {
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _stallNudged = false;
-    _castReinitDone = false;
+    _castReinitCount = 0;
     _bufferingSince = null;
     _lastBufferedEndMs = -1;
     _lastGoodPosMs = -1;
-    _seekFallbackUsed = false;
     _noVideoSince = null;
     _castInitRetried = false;
+    _castDurationCache = Duration.zero;
     final cast = Channel(
       id: '__dlna_cast__',
       name: title.isEmpty ? 'DLNA 投屏' : title,
@@ -679,6 +683,7 @@ class PlayerController extends ChangeNotifier {
     _lastCastSeekAt = null;
     _watchPosMs = -1;
     _watchAdvanceAt = null;
+    _castDurationCache = Duration.zero;
     unawaited(CastStreamProxy.instance.stop());
     // 清空 DLNA 服务端当前媒体：发送端轮询 GetMediaInfo 时看到无媒体，
     // 即可知道投屏已结束，不再显示"已连接"。
@@ -2275,13 +2280,14 @@ class PlayerController extends ChangeNotifier {
   bool get isSeekable {
     final vc = _videoController;
     if (vc == null || !vc.value.isInitialized) return false;
+    // DLNA 投屏推送的是独立媒体文件：只要时长已知且有限就显示进度条。
+    // 视频号/腾讯视频的 stodownload 链接没有文件后缀，旧逻辑用">10 分钟"兜底，
+    // 导致几分钟的短视频不显示进度条；内核在重连/再缓冲时会瞬时报出
+    // 直播标记或 0 时长（Windows mdk 尤其明显），用缓存时长兜底保持显示稳定
+    if (_isCasting) return duration > Duration.zero;
     final d = vc.value.duration;
     // 直播（时长极大）或未知（时长<=0）一律不可拖动
     if (d <= Duration.zero || _isLiveDuration(d)) return false;
-    // DLNA 投屏推送的是独立媒体文件：只要时长已知且有限就显示进度条。
-    // 视频号/腾讯视频的 stodownload 链接没有文件后缀，旧逻辑用">10 分钟"兜底，
-    // 导致几分钟的短视频不显示进度条
-    if (_isCasting) return true;
     final raw = _currentChannel?.streamUrls[_sourceIndex] ?? '';
     final path = raw.toLowerCase().split('?').first;
     if (path.startsWith('rtmp') || path.startsWith('rtsp')) return false;
@@ -2298,10 +2304,31 @@ class PlayerController extends ChangeNotifier {
   }
 
   Duration get position => _videoController?.value.position ?? Duration.zero;
+  // 投屏期间最近一次确认的有效时长：内核重连/再缓冲时会瞬时报出
+  // 直播标记（double.maxFinite）或 0，若直接用会让进度条/时长显示消失
+  Duration _castDurationCache = Duration.zero;
   Duration get duration {
     final d = _videoController?.value.duration ?? Duration.zero;
+    if (_isCasting) {
+      if (d > Duration.zero && !_isLiveDuration(d)) {
+        _castDurationCache = d;
+        return d;
+      }
+      return _castDurationCache;
+    }
     // 对 UI 隐藏 fvp 直播标记/未知时长，避免 Slider 拿到天文数字时长
     return (d <= Duration.zero || _isLiveDuration(d)) ? Duration.zero : d;
+  }
+
+  /// 已缓冲到的末尾位置（进度条缓冲量显示）
+  Duration get bufferedEnd {
+    final v = _videoController?.value;
+    if (v == null || !v.isInitialized) return Duration.zero;
+    var end = 0;
+    for (final r in v.buffered) {
+      if (r.end.inMilliseconds > end) end = r.end.inMilliseconds;
+    }
+    return Duration(milliseconds: end);
   }
 
   Future<void> seekTo(Duration position) async {
@@ -2374,12 +2401,14 @@ class PlayerController extends ChangeNotifier {
   /// 点播 seek 后下载【完全停滞】（缓冲零增长满 30 秒）时，重建内核换
   /// 全新连接并从最后确认可播的位置（[_lastGoodPosMs]）恢复——CDN 挂死了
   /// seek 目标的 Range 请求，恢复到那里必然再次挂死（同一内核上直接
-  /// seek 也会被拖进永久缓冲，必须重建）。回退性重建后仍停滞才断开。
-  /// 整场投屏【只重建一次】（[_castReinitDone] 统一守门，所有路径共用）：
-  /// - 未重建：位置 12 秒不推进先 play() 轻推，25 秒仍不动则重建；
+  /// seek 也会被拖进永久缓冲，必须重建）。重建后仍停滞则再重建，
+  /// 连续 [_maxCastReinits] 次都无进展才断开（4K 高码率流缓冲慢，
+  /// 一次重建的 20 秒耐心会把慢速存活的流误杀）。
+  /// - 位置 12 秒不推进先 play() 轻推，25 秒仍不动则重建；
   ///   seek 宽限期结束后 buffering 再持续 30 秒则软回退/重建（宽限期内
   ///   长视频远距 seek 的缓冲不计时）；有声无画 8 秒则重建
-  /// - 已重建：再卡/再缓冲 20 秒即判定流不可恢复，断开并恢复投屏前频道
+  /// - 连续重建耗尽后：缓冲再 30 秒 / 停滞 40 秒 / 无画 15 秒才断开
+  /// - 位置确认推进时重建计数清零（已完全恢复，可再次自愈）
   void _checkCastStall() {
     if (!_isCasting) return;
     // 「恢复投屏前频道」的 800ms 延迟已在途时不再做任何检测/触发，
@@ -2424,30 +2453,32 @@ class PlayerController extends ChangeNotifier {
       _bufferingSince = null;
     }
 
-    // buffering：未重建持续 30 秒→先软回退再重建；已重建再持续 20 秒→放弃。
+    // buffering：缓冲零增长持续 30 秒→先软回退再重建；可多次重建，
+    // 计数耗尽后仍零增长 30 秒才放弃。
     // 能进到 30 秒分支说明缓冲零增长（增长会不断刷新 _bufferingSince）。
     // 点播零增长 = CDN 把该位置的 Range 请求挂死（实测多在 >93% 尾部）。
     // 注意：同一内核在挂死的请求上直接 seek 会被拖进永久缓冲（实测），
     // 所以回退必须走重建（全新连接）并从最后可播位置恢复，保住会话。
     if (isBuf && _bufferingSince != null) {
       final bufSecs = now.difference(_bufferingSince!).inSeconds;
-      if (!_castReinitDone && bufSecs >= 30) {
-        if (duration > Duration.zero &&
-            !_seekFallbackUsed &&
-            _lastGoodPosMs >= 0 &&
-            (posMs - _lastGoodPosMs).abs() > 5000) {
-          // 位置冻结在 seek 目标（CDN 对该断点的 Range 请求永不回数据）：
-          // 重建内核后从冻结点往后退 30 秒恢复——既避开挂死的断点，也不会
-          // 像旧逻辑那样一路退回片头（_lastGoodPosMs 可能停在几秒处）
-          _seekFallbackUsed = true;
-          _triggerCastRecovery(
-              resumePosMs: posMs > 30000 ? posMs - 30000 : 0);
+      if (bufSecs >= 30) {
+        if (_castReinitCount < _maxCastReinits) {
+          if (duration > Duration.zero &&
+              _lastGoodPosMs >= 0 &&
+              (posMs - _lastGoodPosMs).abs() > 5000) {
+            // 位置冻结在 seek 目标（CDN 对该断点的 Range 请求永不回数据）：
+            // 重建内核后从冻结点往后退 30 秒恢复——既避开挂死的断点，也不会
+            // 一路退回片头；反复挂死则逐次再往后退 30 秒
+            _triggerCastRecovery(
+                resumePosMs: posMs > 30000 ? posMs - 30000 : 0);
+            return;
+          }
+          _triggerCastRecovery();
           return;
         }
-        _triggerCastRecovery();
-        return;
-      }
-      if (_castReinitDone && bufSecs >= 20) {
+        // 连续多次重建缓冲仍零增长：流确实不可恢复
+        CastLog.write(
+            'cast give up: no buffer growth 30s after $_castReinitCount rebuilds');
         stopCastAndRestore();
         return;
       }
@@ -2461,9 +2492,9 @@ class PlayerController extends ChangeNotifier {
     if (noVideo) {
       _noVideoSince ??= now;
       final nvSecs = now.difference(_noVideoSince!).inSeconds;
-      if (!_castReinitDone && nvSecs >= 8) {
+      if (_castReinitCount < _maxCastReinits && nvSecs >= 8) {
         _triggerCastRecovery();
-      } else if (_castReinitDone && nvSecs >= 15) {
+      } else if (_castReinitCount >= _maxCastReinits && nvSecs >= 15) {
         stopCastAndRestore();
       }
     } else {
@@ -2475,11 +2506,12 @@ class PlayerController extends ChangeNotifier {
       _watchPosMs = posMs;
       _watchAdvanceAt = now;
       _stallNudged = false;
-      // 持续播放中的位置推进 = 该位置确认可播，记录为软回退锚点；
+      // 持续播放中的位置推进 = 该位置确认可播，记录为软回退锚点，
+      // 同时清零重建计数（流已完全恢复，后续可再次自愈）；
       // 宽限期内的位置跳变（seek 落点）不算可播证据
       if (!isBuf && !inSeekGrace && v.isPlaying) {
         _lastGoodPosMs = posMs;
-        _seekFallbackUsed = false;
+        _castReinitCount = 0;
       }
       return;
     }
@@ -2487,26 +2519,28 @@ class PlayerController extends ChangeNotifier {
     final stalledMs = now.difference(_watchAdvanceAt!).inMilliseconds;
     // seek 后宽限期：长视频缓冲慢，期间不检查卡顿
     if (_seekGraceUntil != null && now.isBefore(_seekGraceUntil!)) return;
-    if (!_castReinitDone) {
+    if (_castReinitCount < _maxCastReinits) {
       if (!_stallNudged && stalledMs >= 12000) {
         _stallNudged = true;
         vc.play().catchError((_) {});
       } else if (_stallNudged && stalledMs >= 25000) {
         _triggerCastRecovery();
       }
-    } else if (stalledMs >= 20000) {
-      // 重建后观察期位置仍不推进：流真断了（如直播间关播）
+    } else if (stalledMs >= 40000) {
+      // 连续多次重建后位置仍长时间不推进：流真断了（如直播间关播）
       stopCastAndRestore();
     }
   }
 
-  /// 触发投屏自愈重建（整场投屏只允许一次）。
+  /// 触发投屏自愈重建（一场投屏最多 [_maxCastReinits] 次，
+  /// 位置确认推进后计数清零重新可用）。
   /// [resumePosMs] 非空时用指定位置作为重建后的恢复点——用于 seek 停滞
   /// 软回退：CDN 挂死了目标位置的 Range 请求，恢复到那里必然再次挂死，
-  /// 改从最后确认可播的位置恢复。
+  /// 改从冻结点稍前的位置恢复。
   void _triggerCastRecovery({int? resumePosMs}) {
-    if (_castReinitDone) return;
-    _castReinitDone = true;
+    if (_castReinitCount >= _maxCastReinits) return;
+    _castReinitCount++;
+    CastLog.write('cast RECOVERY #$_castReinitCount/$_maxCastReinits');
     _recoverCastPlayback(resumePosMs: resumePosMs);
   }
 
@@ -2556,9 +2590,9 @@ class PlayerController extends ChangeNotifier {
       }
       // 10 秒都没正常起播：宁可从头播放，也不 seek 进可能挂死的断点
     }
-    // 重置观察计时，给新流一个干净的开始（不动 _castReinitDone）。
-    // 否则 _watchAdvanceAt/_bufferingSince 仍是重建前的旧时间，
-    // 新流正常缓冲会被立即误判
+    // 重置观察计时，给新流一个干净的开始（重建计数 [_castReinitCount] 不动，
+    // 由位置推进确认恢复后清零）。否则 _watchAdvanceAt/_bufferingSince
+    // 仍是重建前的旧时间，新流正常缓冲会被立即误判
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _stallNudged = false;

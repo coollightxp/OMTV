@@ -703,30 +703,56 @@ class _SeekBarState extends State<_SeekBar> {
     final pos =
         _dragMs ?? c.position.inMilliseconds.clamp(0, safeMax.round()).toDouble();
     final value = pos.clamp(0, safeMax).toDouble();
+    // 缓冲量（已下载到的末尾位置），投屏 4K 等大文件时直观看到下载进度
+    final buf =
+        c.bufferedEnd.inMilliseconds.toDouble().clamp(0.0, safeMax) / safeMax;
     return Row(
       children: [
         Text(widget.clock(Duration(milliseconds: value.round())),
             style: const TextStyle(color: Colors.white70, fontSize: 11)),
         Expanded(
-          child: SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              activeTrackColor: Colors.blueAccent,
-              inactiveTrackColor: Colors.white24,
-              thumbColor: Colors.blueAccent,
-            ),
-            child: Slider(
-              value: value,
-              max: safeMax,
-              onChangeStart: (v) => setState(() => _dragMs = v),
-              onChanged: (v) => setState(() => _dragMs = v),
-              onChangeEnd: (v) {
-                c.seekTo(Duration(milliseconds: v.round()));
-                setState(() => _dragMs = null);
-              },
-            ),
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              // 缓冲量轨道：垫在 Slider 轨道下面（Slider 轨道两侧各留出
+              // 约一个滑块半径的内边距，这里对齐到同一视觉范围）
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: LayoutBuilder(
+                  builder: (_, cons) => Container(
+                    width: cons.maxWidth * buf,
+                    height: 3,
+                    decoration: BoxDecoration(
+                      color: Colors.white38,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+              SliderTheme(
+                data: SliderThemeData(
+                  trackHeight: 3,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 6),
+                  overlayShape:
+                      const RoundSliderOverlayShape(overlayRadius: 12),
+                  activeTrackColor: Colors.blueAccent,
+                  // 轨道底色稍暗，让上面的缓冲量条可分辨
+                  inactiveTrackColor: Colors.white12,
+                  thumbColor: Colors.blueAccent,
+                ),
+                child: Slider(
+                  value: value,
+                  max: safeMax,
+                  onChangeStart: (v) => setState(() => _dragMs = v),
+                  onChanged: (v) => setState(() => _dragMs = v),
+                  onChangeEnd: (v) {
+                    c.seekTo(Duration(milliseconds: v.round()));
+                    setState(() => _dragMs = null);
+                  },
+                ),
+              ),
+            ],
           ),
         ),
         Text(widget.clock(total),
