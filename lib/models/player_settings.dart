@@ -1,8 +1,5 @@
 /// 播放器设置
 class PlayerSettings {
-  /// 自动播放下一个频道
-  final bool autoPlayNext;
-
   /// 默认音量 (0.0 - 1.0)
   final double defaultVolume;
 
@@ -49,7 +46,6 @@ class PlayerSettings {
   final bool autoReloadStall;
 
   const PlayerSettings({
-    this.autoPlayNext = true,
     this.defaultVolume = 0.8,
     this.defaultBrightness = 0.8,
     this.gestureSensitivity = 1.0,
@@ -68,7 +64,6 @@ class PlayerSettings {
   });
 
   PlayerSettings copyWith({
-    bool? autoPlayNext,
     double? defaultVolume,
     double? defaultBrightness,
     double? gestureSensitivity,
@@ -86,7 +81,6 @@ class PlayerSettings {
     bool? autoReloadStall,
   }) {
     return PlayerSettings(
-      autoPlayNext: autoPlayNext ?? this.autoPlayNext,
       defaultVolume: defaultVolume ?? this.defaultVolume,
       defaultBrightness: defaultBrightness ?? this.defaultBrightness,
       gestureSensitivity: gestureSensitivity ?? this.gestureSensitivity,

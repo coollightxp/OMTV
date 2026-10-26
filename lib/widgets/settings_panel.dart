@@ -97,14 +97,6 @@ class _SettingsPanelState extends State<SettingsPanel> {
                               children: [
                                 _section('播放'),
                                 _switchTile(
-                                  icon: Icons.skip_next,
-                                  title: '自动播放下一频道',
-                                  subtitle: '当前节目结束后自动切换',
-                                  value: s.autoPlayNext,
-                                  onChanged: (v) => controller.updateSettings(
-                                      s.copyWith(autoPlayNext: v)),
-                                ),
-                                _switchTile(
                                   icon: Icons.autorenew,
                                   title: '卡死自动重载',
                                   subtitle: '网页播放长时间无进展时自动重新载入当前频道'

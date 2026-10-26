@@ -2002,7 +2002,6 @@ class PlayerController extends ChangeNotifier {
 
   // 偏好键统一 omtv_ 前缀：与旧 omplayer 共用同一份 SharedPreferences 时
   // 互不干扰（旧值不会被读入，改设置也不会写回旧键）
-  static const _kAutoPlayNext = 'omtv_settings_auto_play_next';
   static const _kSensitivity = 'omtv_settings_sensitivity';
   static const _kAutoHide = 'omtv_settings_auto_hide';
   static const _kLaunchAtStartup = 'omtv_settings_launch_at_startup';
@@ -2025,7 +2024,6 @@ class PlayerController extends ChangeNotifier {
     try {
       final p = await SharedPreferences.getInstance();
       _settings = PlayerSettings(
-        autoPlayNext: p.getBool(_kAutoPlayNext) ?? true,
         gestureSensitivity: p.getDouble(_kSensitivity) ?? 1.0,
         autoHideDelay: p.getInt(_kAutoHide) ?? 3000,
         launchAtStartup: p.getBool(_kLaunchAtStartup) ?? false,
@@ -2055,7 +2053,6 @@ class PlayerController extends ChangeNotifier {
   Future<void> _saveSettings() async {
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setBool(_kAutoPlayNext, _settings.autoPlayNext);
       await p.setDouble(_kSensitivity, _settings.gestureSensitivity);
       await p.setInt(_kAutoHide, _settings.autoHideDelay);
       await p.setBool(_kLaunchAtStartup, _settings.launchAtStartup);
