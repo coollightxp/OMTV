@@ -197,9 +197,15 @@ class RightEpgPanelState extends State<RightEpgPanel> {
   @override
   Widget build(BuildContext context) {
     // 小屏只收窄宽度，不整体缩放（否则高度被缩、上下留空）
-    final shortest = MediaQuery.of(context).size.shortestSide;
-    final wScale = shortest < 600 ? 0.78 : (shortest < 700 ? 0.9 : 1.0);
-    final drawerW = _designWidth * wScale;
+    final size = MediaQuery.of(context).size;
+    final shortest = size.shortestSide;
+    // 与左侧频道栏一致：手机横屏给足宽度（时段+节目名不再被截断），
+    // 竖屏收窄避免遮挡画面
+    final drawerW = shortest < 600
+        ? (size.width > size.height
+            ? (size.width * 0.40).clamp(_designWidth * 0.88, _designWidth)
+            : _designWidth * 0.78)
+        : (shortest < 700 ? _designWidth * 0.9 : _designWidth);
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,

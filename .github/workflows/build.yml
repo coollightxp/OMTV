@@ -912,6 +912,21 @@ jobs:
             '    }',
             '  } catch (...) {}',
             '}',
+            '// ===== OMTV injected: bundled WebView2 fixed runtime =====',
+            '// 随包分发的固定版运行时（exe 同目录 WebView2Runtime），系统未安装',
+            '// WebView2 的机器（LTSC/精简系统）也能正常加载网页频道；目录不存在',
+            '// 时什么都不做，自动回落到系统运行时。必须在任何 WebView2 环境创建前调用。',
+            'static void OMUseBundledWebView2() {',
+            '  wchar_t exePath[MAX_PATH];',
+            '  DWORD n = ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);',
+            '  if (n == 0 || n >= MAX_PATH) return;',
+            '  std::filesystem::path rt =',
+            '      std::filesystem::path(std::wstring(exePath, n)).parent_path() / L"WebView2Runtime";',
+            '  std::error_code ec;',
+            '  if (std::filesystem::exists(rt / L"msedgewebview2.exe", ec)) {',
+            '    ::SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", rt.c_str());',
+            '  }',
+            '}',
             '// ===== end injected code =====',
             'int APIENTRY wWinMain('
           ) -join "`r`n"
@@ -921,6 +936,9 @@ jobs:
             '  // disk-cache-size 256MB，加速二次加载',
             '  ::SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",',
             '      L"--autoplay-policy=no-user-gesture-required --disk-cache-size=268435456");',
+            '',
+            '  // OMTV: 优先使用随包分发的 WebView2 固定版运行时（无需系统安装）',
+            '  OMUseBundledWebView2();',
             '',
             '  // OMTV: 在任何 WebView2 环境创建前清理磁盘缓存',
             '  OMClearWebView2Cache();',
@@ -1206,8 +1224,53 @@ jobs:
       - name: Build Windows
         run: flutter build windows --release
 
+      # WebView2 固定版运行时：解压到 exe 同目录 WebView2Runtime，
+      # 由 main.cpp 注入的 OMUseBundledWebView2() 通过
+      # WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 指定，彻底不依赖系统是否装过
+      # WebView2（LTSC/精简系统/无网机器常见缺失）。
+      # 版本固定在这里（官方 cab 直链长期有效）；要升级只改 URL 和版本注释。
+      # 下载失败不阻断发版：包内没有该目录时自动回落到系统运行时。
+      - name: Bundle WebView2 fixed runtime
+        shell: pwsh
+        run: |
+          $ver = '156.0.4314.42'
+          $url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/074c0930-36ad-4756-9d04-dfe0e503bd94/Microsoft.WebView2.FixedVersionRuntime.$ver.x64.cab"
+          $cab = 'webview2.cab'
+          curl.exe -L --fail --retry 3 --retry-delay 5 -o $cab $url
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $cab)) {
+            Write-Warning 'WebView2 固定版运行时下载失败，本次安装包回落到系统运行时'
+            exit 0
+          }
+          $dest = 'build/windows/x64/runner/Release/WebView2Runtime'
+          if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          expand.exe $cab -F:* $dest | Out-Null
+          # cab 内层是版本目录（Microsoft.WebView2.FixedVersionRuntime.<ver>.x64），
+          # 内容上移一层，保证 msedgewebview2.exe 直接在 WebView2Runtime 下
+          $inner = Get-ChildItem $dest -Directory |
+            Where-Object { $_.Name -like 'Microsoft.WebView2.*' } | Select-Object -First 1
+          if ($inner) {
+            Get-ChildItem $inner.FullName -Force | Move-Item -Destination $dest
+            Remove-Item $inner.FullName -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $dest 'msedgewebview2.exe'))) {
+            throw "WebView2Runtime 中未找到 msedgewebview2.exe（cab 结构变化？）"
+          }
+          Remove-Item $cab
+          $mb = [math]::Round(((Get-ChildItem $dest -Recurse -File |
+            Measure-Object Length -Sum).Sum / 1MB), 1)
+          "WebView2 fixed runtime $ver bundled: $mb MB"
+
+      # 运行时合计约 670MB，Compress-Archive 解压/压缩在这体量上又慢又吃内存，
+      # 优先用 7z（runner 自带），缺失时回落到 Compress-Archive
       - name: Zip Windows build
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMTV-windows.zip
+        shell: pwsh
+        run: |
+          if (Get-Command 7z -ErrorAction SilentlyContinue) {
+            7z a -tzip -mx=5 OMTV-windows.zip .\build\windows\x64\runner\Release\* | Out-Null
+          } else {
+            Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMTV-windows.zip
+          }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4

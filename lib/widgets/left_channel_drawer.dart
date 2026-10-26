@@ -399,9 +399,15 @@ class LeftChannelDrawerState extends State<LeftChannelDrawer> {
   Widget build(BuildContext context) {
     // 小屏只收窄宽度，不再整体等比缩放——整体缩放会让抽屉高度也缩到
     // 72% 并垂直居中，上下各空出一块，无法充满屏幕高度
-    final shortest = MediaQuery.of(context).size.shortestSide;
-    final wScale = shortest < 600 ? 0.78 : (shortest < 700 ? 0.9 : 1.0);
-    final drawerW = _designWidth * wScale;
+    final size = MediaQuery.of(context).size;
+    final shortest = size.shortestSide;
+    // 手机横屏宽度充足：直接给足设计宽度，避免「正在播出的节目」被截断
+    // 成「人民的选举第1…」；竖屏仍收窄，避免抽屉占满整屏
+    final drawerW = shortest < 600
+        ? (size.width > size.height
+            ? (size.width * 0.45).clamp(_designWidth * 0.9, _designWidth)
+            : _designWidth * 0.78)
+        : (shortest < 700 ? _designWidth * 0.9 : _designWidth);
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOutCubic,
