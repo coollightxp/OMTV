@@ -686,6 +686,8 @@ class PlayerController extends ChangeNotifier {
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _castDurationCache = Duration.zero;
+    // 旋转仅限投屏期间使用，断开回电视台时恢复原始方向
+    if (videoRotation.value != 0) videoRotation.value = 0;
     unawaited(CastStreamProxy.instance.stop());
     // 清空 DLNA 服务端当前媒体：发送端轮询 GetMediaInfo 时看到无媒体，
     // 即可知道投屏已结束，不再显示"已连接"。

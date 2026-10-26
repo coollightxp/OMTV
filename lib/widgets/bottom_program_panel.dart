@@ -407,14 +407,15 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isRecording ? '停止录制' : '开始录制',
           hasChannel ? widget.onToggleRecord : null,
         ),
-      // 画面旋转：90° 旋转 ↔ 恢复原始方向（遥控器/手机均可用）
+      // 画面旋转：仅投屏时可用（投过来的竖屏视频需要转正）；
+      // 电视台直播没必要转，网页频道旋转还会触发页面重载，直接禁用
       _KbAction(
         'rotate',
         Icons.screen_rotation,
         c.videoRotation.value == 0
             ? '旋转画面'
             : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
-        hasChannel ? c.cycleVideoRotation : null,
+        c.isCasting ? c.cycleVideoRotation : null,
       ),
       // 听电视/锁定/设置：与安卓保持一致，统一收进返回键弹出的退出面板，
       // 底部只留播放相关按钮，避免窄窗口下图标挤压/与清晰度标签重叠

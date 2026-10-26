@@ -124,7 +124,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.15';
+  static const String _appVersion = '1.0.16';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -502,27 +502,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                   if (webUrl.isNotEmpty)
                     _videoArea(
                       controller,
-                      // 网页频道（央视频/芒果等）的画面在 WebView 里，
-                      // 旋转按钮必须把整个 WebView 一起转，否则只有普通
-                      // 视频流会转、电视台网页播放时看起来"没反应"
-                      ValueListenableBuilder<int>(
-                        valueListenable: controller.videoRotation,
-                        builder: (context, rot, child) => rot == 0
-                            ? child!
-                            : RotatedBox(quarterTurns: rot, child: child),
-                        child: _WebChannelOverlay(
-                          key: ValueKey(webUrl),
-                          url: webUrl,
-                          title: controller.currentChannel?.name ?? '',
-                          foreground: controller.webPageForeground,
-                          onForeground: () =>
-                              controller.setWebForeground(true),
-                          onWebKey: _onWebKey,
-                          onPlayStateChanged: controller.setWebPlaying,
-                          onWebMouseMove: _pokeCursor,
-                          onBridgeAttached: controller.attachWebBridge,
-                          onBridgeDetached: controller.detachWebBridge,
-                        ),
+                      _WebChannelOverlay(
+                        key: ValueKey(webUrl),
+                        url: webUrl,
+                        title: controller.currentChannel?.name ?? '',
+                        foreground: controller.webPageForeground,
+                        onForeground: () =>
+                            controller.setWebForeground(true),
+                        onWebKey: _onWebKey,
+                        onPlayStateChanged: controller.setWebPlaying,
+                        onWebMouseMove: _pokeCursor,
+                        onBridgeAttached: controller.attachWebBridge,
+                        onBridgeDetached: controller.detachWebBridge,
                       ),
                     ),
 
