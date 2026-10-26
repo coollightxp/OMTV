@@ -1272,17 +1272,37 @@ jobs:
             Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMTV-windows.zip
           }
 
+      # 轻量包：剔除内置 WebView2 运行时，只给系统已安装 WebView2 的机器
+      # （约 60MB）。程序找不到包内运行时会自动回落到系统运行时。
+      - name: Zip Windows lite build
+        shell: pwsh
+        run: |
+          $stage = 'build/windows-lite'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          robocopy 'build/windows/x64/runner/Release' $stage /E /XD 'WebView2Runtime' /NFL /NDL /NJH /NJS /NP | Out-Null
+          # robocopy 0-7 都算成功（1=有文件复制），>=8 才是失败
+          if ($LASTEXITCODE -gt 7) { throw "robocopy 失败，退出码 $LASTEXITCODE" }
+          if (Get-Command 7z -ErrorAction SilentlyContinue) {
+            7z a -tzip -mx=5 OMTV-windows-lite.zip .\$stage\* | Out-Null
+          } else {
+            Compress-Archive -Path "$stage/*" -DestinationPath OMTV-windows-lite.zip
+          }
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: OMTV-windows.zip
+          path: |
+            OMTV-windows.zip
+            OMTV-windows-lite.zip
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: OMTV-windows.zip
+          files: |
+            OMTV-windows.zip
+            OMTV-windows-lite.zip
 
   # ==================== Linux Desktop ====================
   build-linux:

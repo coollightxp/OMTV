@@ -411,7 +411,9 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
       _KbAction(
         'rotate',
         Icons.screen_rotation,
-        c.videoRotation.value == 0 ? '旋转画面' : '恢复原始方向',
+        c.videoRotation.value == 0
+            ? '旋转画面'
+            : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
         hasChannel ? c.cycleVideoRotation : null,
       ),
       // 听电视/锁定/设置：与安卓保持一致，统一收进返回键弹出的退出面板，
