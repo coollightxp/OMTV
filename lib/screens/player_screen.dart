@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
@@ -15,6 +13,7 @@ import '../services/pip.dart';
 import '../services/player_controller.dart';
 import '../services/system_power.dart';
 import '../services/web_diag.dart';
+import '../services/web_engine.dart';
 import '../services/web_env.dart';
 import '../services/web_launch.dart';
 import '../services/win_hotkeys.dart';
@@ -124,7 +123,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.16';
+  static const String _appVersion = '1.0.17';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -201,20 +200,29 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         // 等一帧让 WebView 平台视图完成原生销毁，规避退出崩溃
         await Future<void>.delayed(const Duration(milliseconds: 600));
       }
-      // 释放 WebView2 环境及其宿主子进程，避免退出后残留
-      // WebView2 进程继续解码占用资源（Win10 家庭版报"已停止工作"）
-      try {
-        await webViewEnvironment?.dispose();
-      } catch (_) {}
+      await _releaseWebEngine();
       await windowManager.setPreventClose(false);
       await windowManager.destroy();
     } catch (_) {
-      try {
-        await webViewEnvironment?.dispose();
-      } catch (_) {}
+      await _releaseWebEngine();
       await windowManager.setPreventClose(false);
       await windowManager.destroy();
     }
+  }
+
+  /// 释放网页引擎：WebView2 版释放环境及其宿主子进程（避免退出后
+  /// 残留进程继续解码占资源，Win10 家庭版报"已停止工作"）；CEF 版
+  /// 关闭浏览器与子进程
+  Future<void> _releaseWebEngine() async {
+    if (kUseCefWebEngine) {
+      try {
+        await quitWebChannelEngine();
+      } catch (_) {}
+      return;
+    }
+    try {
+      await webViewEnvironment?.dispose();
+    } catch (_) {}
   }
 
   @override
@@ -382,7 +390,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     if (controller.webPageActive && controller.webController != null) {
       try {
         controller.webController
-            .evaluateJavascript(source: 'window.__omShowCursor && window.__omShowCursor()');
+            .eval('window.__omShowCursor && window.__omShowCursor()');
       } catch (_) {}
     }
     if (!controller.isPlaying) return;
@@ -3252,7 +3260,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 
   /// 诊断用：加载进度分桶（25/50/75/100）去重，避免每帧进度回调刷屏
   int _progBucket = 0;
-  InAppWebViewController? _webController;
+  /// 网页引擎控制桥（WebView2 / CEF 由 web_engine 抽象层统一提供）
+  WebChannelController? _webController;
 
   /// 后台缓冲期间每秒探测一次页面 <video> 的真实起播状态
   Timer? _probeTimer;
@@ -5718,12 +5727,15 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
     // 放宽到 25 秒：慢站点 + 弱网下 15 秒易误判"未安装"，导致程序
     // 状态不一致、退出时 WebView 未正确释放进而崩溃。
-    _runtimeTimer = Timer(const Duration(seconds: 25), () {
-      if (mounted && !_sawProgress && _error == null) {
-        WebDiag.log('runtime_missing');
-        setState(() => _runtimeMissing = true);
-      }
-    });
+    // CEF 包内核随程序自带，不存在「缺少运行时」的情况，跳过该判定
+    if (!kUseCefWebEngine) {
+      _runtimeTimer = Timer(const Duration(seconds: 25), () {
+        if (mounted && !_sawProgress && _error == null) {
+          WebDiag.log('runtime_missing');
+          setState(() => _runtimeMissing = true);
+        }
+      });
+    }
   }
 
   @override
@@ -5735,7 +5747,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     if (c != null) {
       WebDiag.log('wv_dispose');
       try {
-        c.dispose(); // 同步方法（返回 void），关闭原生 WebView2 实例
+        c.release(); // 关闭底层原生网页实例（WebView2 / CEF 由抽象层分派）
       } catch (_) {}
     }
     WebDiag.end();
@@ -5790,19 +5802,19 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     final c = _webController;
     if (c == null) return;
     try {
-      await c.evaluateJavascript(source: _noContextMenuJs);
-      await c.evaluateJavascript(source: _cssJs);
-      await c.evaluateJavascript(source: _bootJs);
+      await c.eval(_noContextMenuJs);
+      await c.eval(_cssJs);
+      await c.eval(_bootJs);
       // 站点脚本在 _bootJs 之后注入：置 __omSkipPin 让通用铺满让位，
       // 并清掉 _bootJs 可能已抢先铺满的元素；随后立刻按当前频道点台
       final siteJs = _siteJsFor(_activeUrl);
       if (siteJs != null) {
-        await c.evaluateJavascript(source: siteJs);
-        await c.evaluateJavascript(source: _siteGoCall());
+        await c.eval(siteJs);
+        await c.eval(_siteGoCall());
         WebDiag.log('sitego', 'via=inject|title=$_activeTitle');
       }
       // 嗅探脚本只在兜底重载后注入；默认页面保持零 hook 纯净环境
-      if (_sniffEnabled) await c.evaluateJavascript(source: _sniffJs);
+      if (_sniffEnabled) await c.eval(_sniffJs);
       // 听电视期间（可能在后台）：页面重载后要重新落到官方「音频」档，
       // 否则换台后只拉视频流，退后台容易没声音
       if (mounted && context.read<PlayerController>().listenMode) {
@@ -5822,8 +5834,8 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     if (c == null) return;
     // 每次探测顺带确保全屏样式/静音状态（SPA 页面可能被站点脚本改写）
     try {
-      await c.evaluateJavascript(source: _cssJs);
-      final r = await c.evaluateJavascript(source: _probeJs);
+      await c.eval(_cssJs);
+      final r = await c.eval(_probeJs);
       // _probeJs 返回 [起播0/1, 页面视频状态串]；兼容旧版裸 0/1 返回
       bool playing;
       if (r is List) {
@@ -5928,9 +5940,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       dynamic r;
       var stalled = false;
       try {
-        r = await c
-            .evaluateJavascript(source: _healthJs)
-            .timeout(const Duration(seconds: 4));
+        r = await c.eval(_healthJs).timeout(const Duration(seconds: 4));
       } on TimeoutException {
         // 页面主线程完全无响应（连注入 JS 都执行不了）：同样按无进展计拍
         stalled = true;
@@ -5983,7 +5993,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     _siteRetryCount++;
     WebDiag.log('sitego_retry', 'n=$_siteRetryCount');
     _webController
-        ?.evaluateJavascript(source: _siteGoCall())
+        ?.eval(_siteGoCall())
         .catchError((_) => null);
   }
 
@@ -6002,7 +6012,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
       WebDiag.log('sitego', 'via=title|title=${widget.title}');
       _siteRetryCount = 0;
       _webController
-          ?.evaluateJavascript(source: _siteGoCall())
+          ?.eval(_siteGoCall())
           .catchError((_) => null);
     }
   }
@@ -6012,42 +6022,18 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        InAppWebView(
+        buildWebChannelView(
           key: ValueKey('web_${widget.url}'),
-          webViewEnvironment: webViewEnvironment,
-          initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+          url: widget.url,
           // 默认零 hook 纯净环境（对齐 NewBox webview:// 纯网页播放
           // 策略）；轻嗅探不再随 WebView 创建注入，改为 8 秒兜底时运行时
           // 由 _inject() 注入（换 key 重建 WebView 会摧毁已就绪的播放器）
-          initialUserScripts: UnmodifiableListView<UserScript>([
-            // 右键菜单屏蔽提前到 document-start：页面加载失败/
-            // 未完成时 onLoadStop 不触发，运行时注入会漏掉，
-            // WebView2 默认菜单（返回/刷新/另存为/打印）就会冒出来
-            UserScript(
-              source: _noContextMenuJs,
-              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-              forMainFrameOnly: false,
-            ),
-          ]),
-          initialSettings: InAppWebViewSettings(
-            // 网页播放器（如央视频）自动开播，无需用户先点击网页
-            mediaPlaybackRequiresUserGesture: false,
-            // 安卓退到后台/隐藏窗口后继续播放音频（听电视模式依赖）。
-            // 不加这一项 WebView 会随窗口不可见暂停媒体，导致通知卡片
-            // 按钮有效但完全没有声音
-            allowBackgroundAudioPlaying: true,
-            supportZoom: false,
-            transparentBackground: false,
-            cacheMode: CacheMode.LOAD_DEFAULT,
-            // 允许 iframe 内的视频自动播放（央视频播放器在 iframe 内）
-            iframeAllow: "autoplay; fullscreen; encrypted-media",
-            iframeAllowFullscreen: true,
-            // 伪装桌面 Chrome，避免安卓 WebView 被网站检测到移动端
-            // 而重定向到“下载 App”页
-            userAgent:
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          ),
-          onWebViewCreated: (controller) async {
+          //
+          // 右键菜单屏蔽提前到 document-start：页面加载失败/未完成时
+          // onLoadStop 不触发，运行时注入会漏掉，WebView2 默认菜单
+          // （返回/刷新/另存为/打印）就会冒出来
+          documentStartScripts: const [_noContextMenuJs],
+          onCreated: (controller) {
             _webController = controller;
             // 内置播放失败回退过、或用户手动选择网页观看的页面，
             // 本次运行不再尝试自动接管（起播即推网页前台）
@@ -6058,117 +6044,79 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
                 'skip=${_sniffAbandoned ? 1 : 0}|sniff=$_sniffEnabled');
             // 把 controller 存到 PlayerController，供 Dart 侧调用网页 JS
             context.read<PlayerController>().webController = controller;
-            // JS bridge 通道
-            controller.addJavaScriptHandler(
-              handlerName: 'omPlaying',
-              callback: (_) {
-                WebDiag.log('om_playing',
-                    'abandoned=${_sniffAbandoned ? 1 : 0}|fg=${widget.foreground ? 1 : 0}');
-                if (!mounted || widget.foreground) return;
-                if (_sniffAbandoned) {
-                  widget.onForeground();
-                } else {
-                  _markWebPlayReady();
-                }
-              },
-            );
-            controller.addJavaScriptHandler(
-              handlerName: 'omKey',
-              callback: (args) {
-                if (args.isNotEmpty) {
-                  widget.onWebKey(args.first.toString());
-                }
-              },
-            );
-            controller.addJavaScriptHandler(
-              handlerName: 'omMouse',
-              callback: (_) => widget.onWebMouseMove(),
-            );
-            controller.addJavaScriptHandler(
-              handlerName: 'omPlay',
-              callback: (args) {
-                if (args.isNotEmpty) {
-                  widget.onPlayStateChanged(
-                      args.first.toString() == '1' ||
-                          args.first.toString() == '1.0');
-                }
-              },
-            );
-            // 网页实际视频尺寸：校正控制栏清晰度文字
-            controller.addJavaScriptHandler(
-              handlerName: 'omRes',
-              callback: (args) {
-                if (args.isEmpty) return null;
-                final parts = args.first.toString().split(',');
-                if (parts.length == 2) {
-                  context.read<PlayerController>().reportWebVideoSize(
-                        int.tryParse(parts[0]) ?? 0,
-                        int.tryParse(parts[1]) ?? 0,
-                      );
-                }
-                return null;
-              },
-            );
-            // 网页录制：MediaRecorder 分块（base64）与结束通知
-            controller.addJavaScriptHandler(
-              handlerName: 'omRecChunk',
-              callback: (args) {
-                if (args.isNotEmpty) {
-                  context
-                      .read<PlayerController>()
-                      .appendWebRecordingChunk(args.first.toString());
-                }
-                return null;
-              },
-            );
-            controller.addJavaScriptHandler(
-              handlerName: 'omRecEnd',
-              callback: (args) {
-                context.read<PlayerController>().finishWebRecording();
-                return null;
-              },
-            );
-            // 网页 XHR/fetch 嗅探到的真实媒体流（芒果TV 等）
-            controller.addJavaScriptHandler(
-              handlerName: 'omStream',
-              callback: (args) {
-                if (args.isNotEmpty) _onSniffedStream(args.first);
-                return null;
-              },
-            );
-            // 页面侧诊断回报：起播来源（bootJs/站点脚本）、站点脚本
-            // 点台动作与结果（串台定位），统一进 WebDiag 时间线
-            controller.addJavaScriptHandler(
-              handlerName: 'omDiag',
-              callback: (args) {
-                if (args.isNotEmpty) WebDiag.log('js', args.first.toString());
-                return null;
-              },
-            );
             // 注册控制桥：执行 JS（播放/暂停）与网页截图
             widget.onBridgeAttached(
-              eval: (js) => controller.evaluateJavascript(source: js),
-              screenshot: () async => await controller.takeScreenshot(),
+              eval: (js) => controller.eval(js),
+              screenshot: () async => await controller.screenshot(),
             );
           },
-          onLoadStart: (controller, _) {
+          // 页面脚本 → Flutter 的消息通道
+          jsHandlers: {
+            'omPlaying': (_) {
+              WebDiag.log('om_playing',
+                  'abandoned=${_sniffAbandoned ? 1 : 0}|fg=${widget.foreground ? 1 : 0}');
+              if (!mounted || widget.foreground) return;
+              if (_sniffAbandoned) {
+                widget.onForeground();
+              } else {
+                _markWebPlayReady();
+              }
+            },
+            'omKey': (payload) {
+              if (payload.isNotEmpty) widget.onWebKey(payload);
+            },
+            'omMouse': (_) => widget.onWebMouseMove(),
+            'omPlay': (payload) => widget.onPlayStateChanged(
+                payload == '1' || payload == '1.0'),
+            // 网页实际视频尺寸：校正控制栏清晰度文字
+            'omRes': (payload) {
+              if (payload.isEmpty) return;
+              final parts = payload.split(',');
+              if (parts.length == 2) {
+                context.read<PlayerController>().reportWebVideoSize(
+                      int.tryParse(parts[0]) ?? 0,
+                      int.tryParse(parts[1]) ?? 0,
+                    );
+              }
+            },
+            // 网页录制：MediaRecorder 分块（base64）与结束通知
+            'omRecChunk': (payload) {
+              if (payload.isNotEmpty) {
+                context
+                    .read<PlayerController>()
+                    .appendWebRecordingChunk(payload);
+              }
+            },
+            'omRecEnd': (_) =>
+                context.read<PlayerController>().finishWebRecording(),
+            // 网页 XHR/fetch 嗅探到的真实媒体流（芒果TV 等）
+            'omStream': (payload) {
+              if (payload.isNotEmpty) _onSniffedStream(payload);
+            },
+            // 页面侧诊断回报：起播来源（bootJs/站点脚本）、站点脚本
+            // 点台动作与结果（串台定位），统一进 WebDiag 时间线
+            'omDiag': (payload) {
+              if (payload.isNotEmpty) WebDiag.log('js', payload);
+            },
+          },
+          onLoadStart: (_) {
             WebDiag.log('load_start', 'sniff=$_sniffEnabled');
           },
-          onLoadStop: (controller, _) async {
+          onLoadStop: (_) async {
             _sawProgress = true;
             WebDiag.log('load_stop');
             if (mounted) setState(() => _loaded = true);
             await _inject();
           },
           // 页面开始渲染时立即注入 CSS，避免白屏闪现
-          onPageCommitVisible: (controller, _) async {
+          onPageCommitVisible: () async {
             WebDiag.log('commit_visible');
             try {
-              await controller.evaluateJavascript(source: _cssJs);
+              await _webController?.eval(_cssJs);
             } catch (_) {}
           },
-          onProgressChanged: (controller, progress) {
-            // 能收到任何进度都说明 WebView2 运行时工作正常
+          onProgress: (progress) {
+            // 能收到任何进度都说明引擎工作正常（CEF 包固定给 10/100）
             if (progress > 0 && !_sawProgress) {
               WebDiag.log('progress_first', 'v=$progress');
             }
@@ -6184,13 +6132,10 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
               setState(() => _loaded = true);
             }
           },
-          onReceivedError: (controller, request, error) {
-            // 主文档加载失败才提示（子资源失败不影响播放）
-            if (request.isForMainFrame ?? false) {
-              WebDiag.log('load_error', 'desc=${error.description}');
-              if (mounted) {
-                setState(() => _error = error.description);
-              }
+          onError: (description) {
+            WebDiag.log('load_error', 'desc=$description');
+            if (mounted) {
+              setState(() => _error = description);
             }
           },
         ),

@@ -29,7 +29,7 @@ import 'format_hint.dart';
 import 'media_capture_service.dart';
 import 'native_capture.dart';
 import 'reservation_manager.dart';
-import 'web_env.dart';
+import 'web_engine.dart';
 import 'web_launch.dart';
 import 'network_monitor.dart';
 import 'osd_bus.dart';
@@ -1169,10 +1169,10 @@ class PlayerController extends ChangeNotifier {
     // WebView 平台视图销毁后清理其用户数据目录：网页视频播放久了
     // 缓存膨胀会让后续频道读入变慢（用户实测删除目录后立即变快）。
     // InPrivate 下文件关闭即释放，可整个删除；仍有锁定时
-    // cleanWebView2Cache 内部退化为只删缓存子目录，下次启动再全删。
+    // cleanWebChannelCache 内部退化为只删缓存子目录，下次启动再全删。
     Timer(const Duration(milliseconds: 1500), () {
       try {
-        cleanWebView2Cache();
+        cleanWebChannelCache();
       } catch (_) {}
     });
   }

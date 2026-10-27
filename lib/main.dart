@@ -11,15 +11,14 @@ import 'app.dart';
 import 'services/auto_launch.dart';
 import 'services/fvp_register.dart';
 import 'services/media_capture_service.dart';
-import 'services/web_env.dart';
+import 'services/web_engine.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 启动前清理 WebView2 缓存，避免旧缓存导致网页频道加载慢/卡旧画面
-  cleanWebView2Cache();
-  // 创建自定义 WebView2 环境，禁用磁盘缓存 + 允许无手势自动播放
-  await initWebViewEnvironment();
+  // 启动前清理网页引擎缓存，避免旧缓存导致网页频道加载慢/卡旧画面；
+  // WebView2 包走系统运行时，CEF 包初始化内置内核（由抽象层分派）
+  await initWebChannelEngine();
 
   // 播放缓冲设置需在注册 MDK 后端前读取（仅启动时应用一次）
   // 注意：不能让 SharedPreferences 失败阻塞 runApp——平台通道一失败
