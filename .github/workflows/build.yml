@@ -1293,6 +1293,26 @@ jobs:
       - name: Install CEF dependencies
         run: flutter pub get
 
+      # webview_cef 默认走 GPU 零拷贝纹理（CEF OnAcceleratedPaint → D3D11 共享
+      # 纹理 → Flutter GPU surface）。但该构建没有 OnPaint 回退：一旦 CEF 在
+      # 用户机器上退回软件渲染（GPU 进程被拦/崩溃、驱动不支持、远程桌面等），
+      # OnPaint 帧没有接收者，网页频道永久黑屏（仅 stderr 一条 5 秒警告）。
+      # CEF 包统一改走软件像素缓冲路径（OnPaint → CPU 纹理），牺牲一点性能
+      # 换全环境可用
+      - name: Force software rendering for CEF package
+        shell: pwsh
+        run: |
+          $cm = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\*\webview_cef-*\windows\CMakeLists.txt" |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $cm) { throw 'webview_cef CMakeLists.txt not found in pub cache' }
+          $t = [System.IO.File]::ReadAllText($cm)
+          $anchor = 'option(WEBVIEW_CEF_GPU_TEXTURE "Use the zero-copy GPU texture rendering path" ON)'
+          if (-not $t.Contains($anchor)) { throw 'GPU texture option anchor not found' }
+          $t = $t.Replace($anchor,
+            'option(WEBVIEW_CEF_GPU_TEXTURE "Use the zero-copy GPU texture rendering path" OFF)')
+          [System.IO.File]::WriteAllText($cm, $t, (New-Object System.Text.UTF8Encoding($false)))
+          Select-String -Path $cm -Pattern 'WEBVIEW_CEF_GPU_TEXTURE' | ForEach-Object { $_.Line.Trim() }
+
       - name: Build Windows CEF
         run: flutter build windows --release --dart-define=OMTV_CEF=true
 
