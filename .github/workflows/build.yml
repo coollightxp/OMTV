@@ -1255,7 +1255,9 @@ jobs:
         run: |
           $f = 'windows/runner/main.cpp'
           $t = [System.IO.File]::ReadAllText($f)
-          $incAnchor = '#include "flutter/generated_plugin_registrant.h"'
+          # Flutter 模板 main.cpp 只 include flutter_window.h / utils.h；
+          # generated_plugin_registrant.h 在 flutter_window.cpp 里，别锚错文件
+          $incAnchor = '#include "flutter_window.h"'
           if (-not $t.Contains($incAnchor)) {
             throw 'main.cpp include anchor not found'
           }

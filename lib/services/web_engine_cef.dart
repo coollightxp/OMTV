@@ -37,7 +37,7 @@ List<String> _cefUserDataPaths() {
         : file;
     if (name.isNotEmpty) names.add(name);
   } catch (_) {}
-  return [for (final n in names) '$local$sep$n$sepUser Data'];
+  return [for (final n in names) '$local$sep$n${sep}User Data'];
 }
 
 /// 初始化 CEF 运行时（main 启动时调用一次）。
