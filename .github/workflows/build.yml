@@ -1313,6 +1313,22 @@ jobs:
           [System.IO.File]::WriteAllText($cm, $t, (New-Object System.Text.UTF8Encoding($false)))
           Select-String -Path $cm -Pattern 'WEBVIEW_CEF_GPU_TEXTURE' | ForEach-Object { $_.Line.Trim() }
 
+      # 【临时诊断】用户机器 CEF 包黑屏但 debug.log 无任何错误、子进程正常，
+      # 需要 verbose 日志（含页面加载/导航记录）+ 远程调试端口定位是
+      # 页面没加载 还是 帧没显示。定位完成后应回退本步骤
+      - name: Enable CEF diagnostics (temporary)
+        shell: pwsh
+        run: |
+          $pp = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\*\webview_cef-*\common\webview_plugin.cc" |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $pp) { throw 'webview_plugin.cc not found in pub cache' }
+          $t = [System.IO.File]::ReadAllText($pp)
+          $anchor = 'cefs.multi_threaded_message_loop = true;'
+          if (-not $t.Contains($anchor)) { throw 'startCEF anchor not found' }
+          $t = $t.Replace($anchor, $anchor + "`r`n`t`t`tcefs.log_severity = LOGSEVERITY_VERBOSE;`r`n`t`t`tcefs.remote_debugging_port = 9222;")
+          [System.IO.File]::WriteAllText($pp, $t, (New-Object System.Text.UTF8Encoding($false)))
+          Select-String -Path $pp -Pattern 'log_severity|remote_debugging_port' | ForEach-Object { $_.Line.Trim() }
+
       - name: Build Windows CEF
         run: flutter build windows --release --dart-define=OMTV_CEF=true
 
