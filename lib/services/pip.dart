@@ -86,15 +86,21 @@ Future<bool> openNotifSettings() async {
 }
 
 /// 更新通知栏「音频播放」卡片（前台服务，含上一台/暂停/下一台/关闭）
+/// [logo]/[logoKey] 为当前频道台标 PNG 的 base64 与标识：
+/// 原生把它作为卡片右侧大图与锁屏封面（变化时才重新解码）
 Future<void> audioNotify(
     {required String name,
     required String program,
-    required bool playing}) async {
+    required bool playing,
+    String logo = '',
+    String logoKey = ''}) async {
   try {
     await _channel.invokeMethod('audioUpdate', {
       'name': name,
       'program': program,
       'playing': playing,
+      'logo': logo,
+      'logoKey': logoKey,
     });
   } catch (_) {}
 }

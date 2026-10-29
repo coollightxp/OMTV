@@ -20,6 +20,10 @@ import 'package:flutter/services.dart';
 ///   - "1"/"0"    开关热键捕获（设置面板输入框打开时关闭）
 ///   - "C1"/"C0"  开关空闲光标隐藏
 ///   - "W1"/"W0"  开关网页前台转发模式
+///   - "tray:..." 听电视托盘图标（加/删/隐藏窗口/恢复窗口）
+///   - "tb:..."   听电视任务栏缩略图控制栏（加/删/播放态）
+/// 原生 → Dart：
+///   - "cmd:xxx"  托盘/任务栏按钮命令（playpause/prev/next/restore/stop）
 /// 非 Windows 平台调用全部静默无效。
 class WinHotkeys {
   static const BasicMessageChannel<String> _channel =
@@ -29,6 +33,9 @@ class WinHotkeys {
 
   /// 动作键回调；isDown=true 为按下、false 为抬起
   void Function(String action, bool isDown)? _onAction;
+
+  /// 托盘/任务栏控制栏命令回调
+  void Function(String cmd)? _onShellCmd;
   bool _handlerInstalled = false;
 
   /// 注册数字键回调（参数 0-9）。传 null 注销。
@@ -44,8 +51,14 @@ class WinHotkeys {
     _syncHandler();
   }
 
+  /// 注册托盘/任务栏控制栏命令回调（playpause/prev/next/restore/stop）
+  void setShellCommandHandler(void Function(String cmd)? onCmd) {
+    _onShellCmd = onCmd;
+    _syncHandler();
+  }
+
   void _syncHandler() {
-    if (_onDigit == null && _onAction == null) {
+    if (_onDigit == null && _onAction == null && _onShellCmd == null) {
       if (_handlerInstalled) {
         _channel.setMessageHandler(null);
         _handlerInstalled = false;
@@ -57,7 +70,9 @@ class WinHotkeys {
     // setMessageHandler 要求 Future<String>（非空），回复空串即可
     _channel.setMessageHandler((String? msg) async {
       final m = msg ?? '';
-      if (m.startsWith('k:')) {
+      if (m.startsWith('cmd:')) {
+        _onShellCmd?.call(m.substring(4));
+      } else if (m.startsWith('k:')) {
         _onAction?.call(m.substring(2), true);
       } else if (m.startsWith('u:')) {
         _onAction?.call(m.substring(2), false);
@@ -93,4 +108,37 @@ class WinHotkeys {
       await _channel.send(enable ? 'W1' : 'W0');
     } catch (_) {}
   }
+
+  // ==================== 听电视：托盘 + 任务栏控制栏 ====================
+
+  Future<void> _send(String msg) async {
+    try {
+      await _channel.send(msg);
+    } catch (_) {
+      // 非 Windows 或旧 runner 无实现：忽略
+    }
+  }
+
+  /// 添加托盘图标（窗口仍可见），[tip] 为提示文字
+  Future<void> trayAdd(String tip) => _send('tray:add:$tip');
+
+  /// 移除托盘图标
+  Future<void> trayRemove() => _send('tray:del');
+
+  /// 隐藏窗口到系统托盘（双击托盘图标恢复；右键可切台/退出听电视）
+  Future<void> hideWindowToTray(String tip) => _send('tray:hide:$tip');
+
+  /// 从托盘恢复窗口
+  Future<void> showWindowFromTray() => _send('tray:show');
+
+  /// 在任务栏缩略图预览上加控制栏（上一台/暂停/下一台/退出听电视）
+  Future<void> taskbarShow({required bool playing}) =>
+      _send('tb:add:${playing ? 1 : 0}');
+
+  /// 更新控制栏的播放/暂停状态与提示
+  Future<void> taskbarUpdate({required bool playing}) =>
+      _send('tb:state:${playing ? 1 : 0}');
+
+  /// 移除任务栏控制栏
+  Future<void> taskbarHide() => _send('tb:del');
 }

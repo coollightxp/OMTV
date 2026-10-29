@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Icons;
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter/widgets.dart';
 import 'package:video_player/video_player.dart';
 import 'package:screen_brightness/screen_brightness.dart';
@@ -234,27 +235,10 @@ class PlayerController extends ChangeNotifier {
       notifyListeners();
     });
 
-    // 安卓通知栏「音频播放」卡片的按钮命令（原生广播 → MethodChannel）
-    listenAudioCommands((cmd) async {
-      switch (cmd) {
-        case 'playpause':
-          await togglePlayPause();
-          break;
-        case 'prev':
-          await previousChannel();
-          break;
-        case 'next':
-          await nextChannel();
-          break;
-        case 'stop':
-        case 'restore':
-          // 关闭音频模式 / 点卡片回 App：原生已把窗口拉回前台
-          await exitListenMode();
-          break;
-      }
-      // 仍在听电视则刷新卡片（切台/暂停后节目信息变了）
-      if (_listenMode) _notifyListenCard(force: true);
-    });
+    // 安卓通知栏「音频播放」卡片 / Windows 托盘与任务栏控制栏：
+    // 命令语义一致，统一入口
+    listenAudioCommands(_onListenCommand);
+    WinHotkeys().setShellCommandHandler(_onListenCommand);
 
     // 启动网络监控：开机启动时可能网络未就绪，需要检测并重试
     NetworkMonitor.instance.start();
@@ -846,6 +830,11 @@ class PlayerController extends ChangeNotifier {
   bool _webPageActive = false;
   bool get webPageActive => _webPageActive;
 
+  /// 网页频道重载序号：每次重载 +1，内嵌网页控件据此重置嗅探/起播状态
+  /// （否则重载后页面已出声，前台遮罩仍显示「正在打开网页播放」）
+  int _webReloadSerial = 0;
+  int get webReloadSerial => _webReloadSerial;
+
   /// 网页频道的 WebView 控制器（Dart 侧调用网页 JS 用，如重置光标隐藏定时器）
   dynamic webController;
 
@@ -1141,6 +1130,9 @@ class PlayerController extends ChangeNotifier {
     if (_webPageActive) {
       _webPageForeground = false;
       _webPlaying = false;
+      // 重载序号：内嵌网页控件据此重置嗅探/起播决策状态，
+      // 否则重载后页面已起播也不会被推到前台（后台有声、前台黑屏）
+      _webReloadSerial++;
       notifyListeners();
       final wc = webController;
       if (wc != null) {
@@ -1150,8 +1142,10 @@ class PlayerController extends ChangeNotifier {
           final eval = _webEval;
           if (eval != null) eval('location.reload()').catchError((_) => null);
         }
-        return;
       }
+      // 网页频道只重载页面，绝不回落到 playChannel：
+      // 否则可能把网页播放器替换成内置视频，出现"同时两个视频在放"
+      return;
     }
     _sourceIndex = 0;
     await playChannel(channel);
@@ -1847,6 +1841,44 @@ class PlayerController extends ChangeNotifier {
     return _isTv;
   }
 
+  /// 当前平台是否为 Windows（托盘/任务栏控制栏只有 Windows 原生实现）
+  bool get _isWindows => !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  /// 听电视托盘提示（频道名 + 当前节目）
+  String get _listenTip {
+    final name = _currentChannel?.name ?? '';
+    final program = currentProgram?.title ?? '';
+    if (name.isEmpty) return 'OMTV 听电视';
+    return program.isEmpty
+        ? 'OMTV 听电视：$name'
+        : 'OMTV 听电视：$name · $program';
+  }
+
+  /// 托盘图标是否已添加（隐藏窗口后由托盘提供操作入口）
+  bool _trayShown = false;
+
+  /// 听电视卡片/托盘/任务栏按钮的统一命令入口
+  Future<void> _onListenCommand(String cmd) async {
+    switch (cmd) {
+      case 'playpause':
+        await togglePlayPause();
+        break;
+      case 'prev':
+        await previousChannel();
+        break;
+      case 'next':
+        await nextChannel();
+        break;
+      case 'stop':
+      case 'restore':
+        // 关闭音频模式 / 点卡片回 App：原生已把窗口拉回前台
+        await exitListenMode();
+        break;
+    }
+    // 仍在听电视则刷新卡片（切台/暂停后节目信息变了）
+    if (_listenMode) _notifyListenCard(force: true);
+  }
+
   Future<void> enterListenMode() async {
     if (_listenMode) return;
     _listenMode = true;
@@ -1859,11 +1891,24 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     if (isDesktop && _settings.listenModeHideWindow) {
       try {
-        // 只最小化，保留任务栏图标：窗口最小化后本进程不再是前台，
-        // 原生键盘钩子不会转发按键，必须留一条可见的恢复入口
-        // （任务栏点击/Alt+Tab 恢复后再点卡片退出听电视）
-        await windowManager.minimize();
+        if (_isWindows) {
+          // Windows：隐藏到系统托盘（任务栏按钮随之消失），
+          // 双击托盘图标恢复窗口；托盘右键菜单可切台/暂停/退出听电视
+          await WinHotkeys().hideWindowToTray(_listenTip);
+          _trayShown = true;
+        } else {
+          // 只最小化，保留任务栏图标：窗口最小化后本进程不再是前台，
+          // 原生键盘钩子不会转发按键，必须留一条可见的恢复入口
+          // （任务栏点击/Alt+Tab 恢复后再点卡片退出听电视）
+          await windowManager.minimize();
+        }
       } catch (_) {}
+    } else if (isDesktop &&
+        _isWindows &&
+        _settings.listenModeShowCard) {
+      // Windows 不隐藏窗口时：任务栏缩略图控制栏（类似 MediaPlayer
+      // 悬停预览里的控制条）承担信息卡片职责
+      await WinHotkeys().taskbarShow(playing: isPlaying);
     } else if (!kIsWeb &&
         _settings.listenModeHideWindow &&
         !await _resolveIsTv() &&
@@ -1895,6 +1940,13 @@ class PlayerController extends ChangeNotifier {
     _applyWebAudio(false);
     await stopListenCard();
     if (isDesktop) {
+      if (_isWindows) {
+        // 先撤托盘/任务栏控制栏，再从托盘状态恢复窗口
+        await WinHotkeys().trayRemove();
+        await WinHotkeys().taskbarHide();
+        await WinHotkeys().showWindowFromTray();
+        _trayShown = false;
+      }
       try {
         await windowManager.restore();
         await windowManager.show();
@@ -1920,7 +1972,38 @@ class PlayerController extends ChangeNotifier {
     final sig = '$name|$program|$playing';
     if (!force && sig == _listenCardSig) return;
     _listenCardSig = sig;
-    await audioNotify(name: name, program: program, playing: playing);
+    // 台标：安卓卡片右侧大图/锁屏封面改用当前频道台标（首次读入后缓存）
+    final logoKey = _currentChannel?.logoUrl ?? '';
+    final logo = (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+        ? await _loadLogoBase64(logoKey)
+        : '';
+    await audioNotify(
+        name: name, program: program, playing: playing, logo: logo, logoKey: logoKey);
+    if (_isWindows) {
+      if (_trayShown) {
+        // 托盘已存在（窗口在托盘里）：只刷新提示文字
+        await WinHotkeys().trayAdd(_listenTip);
+      } else if (!_settings.listenModeHideWindow &&
+          _settings.listenModeShowCard) {
+        // 任务栏控制栏：播放/暂停图标跟随状态
+        await WinHotkeys().taskbarUpdate(playing: playing);
+      }
+    }
+  }
+
+  /// 台标资源（assets/logos/xxx.png）读成 base64，供安卓通知卡片使用。
+  /// 只在首次遇到该台标时读盘，之后走内存缓存。
+  final Map<String, String> _logoCache = {};
+  Future<String> _loadLogoBase64(String asset) async {
+    if (asset.isEmpty) return '';
+    if (_logoCache.containsKey(asset)) return _logoCache[asset]!;
+    String b64 = '';
+    try {
+      final data = await rootBundle.load(asset);
+      b64 = base64Encode(data.buffer.asUint8List());
+    } catch (_) {}
+    _logoCache[asset] = b64;
+    return b64;
   }
 
   /// 退出听电视时撤掉通知栏卡片

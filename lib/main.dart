@@ -16,8 +16,7 @@ import 'services/web_engine.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 启动前清理网页引擎缓存，避免旧缓存导致网页频道加载慢/卡旧画面；
-  // WebView2 包走系统运行时，CEF 包初始化内置内核（由抽象层分派）
+  // 启动前清理网页引擎缓存，避免旧缓存导致网页频道加载慢/卡旧画面
   await initWebChannelEngine();
 
   // 播放缓冲设置需在注册 MDK 后端前读取（仅启动时应用一次）

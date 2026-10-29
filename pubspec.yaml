@@ -1,7 +1,7 @@
 name: omtv
 description: OMTV 欧米电视：央视频内置频道/EPG 的跨平台电视播放器。
 publish_to: 'none'
-version: 1.0.20+21
+version: 1.0.21+22
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -51,11 +51,6 @@ dependencies:
   # 网页频道：Windows/Android/macOS/Web 内嵌网页控件；
   # Linux 回退 url_launcher 打开系统浏览器
   flutter_inappwebview: ^6.1.5
-
-  # Windows CEF 包专用：随包分发 Chromium 内核，不依赖系统 WebView2。
-  # 标准包构建时由 CI 移除本依赖并把 web_engine_cef.dart 换成空实现
-  # （CEF 插件 DLL 静态依赖 libcef.dll，未携带内核的包不能链接它）
-  webview_cef: ^0.6.2
 
   # 系统浏览器兜底（非 Windows / 无 WebView2 时打开网页频道）
   url_launcher: ^6.3.0

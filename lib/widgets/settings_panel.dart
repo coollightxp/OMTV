@@ -134,7 +134,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                   subtitle: controller.isTv
                                       ? '电视端没有通知栏可操作：听电视时始终显示信息卡片，不会退到后台'
                                       : controller.isDesktop
-                                          ? 'Windows 摸鱼模式：只保留声音，窗口最小化（点任务栏恢复）'
+                                          ? 'Windows 摸鱼模式：只保留声音并隐藏到系统托盘，双击托盘图标恢复（右键可切台/退出）'
                                           : '安卓：只留声音，应用退到后台，通知栏卡片可切台/退出',
                                   value: s.listenModeHideWindow,
                                   onChanged: (v) => controller.updateSettings(
@@ -145,19 +145,27 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                   title: '听电视时显示信息卡片',
                                   subtitle: controller.isTv
                                       ? '电视端固定显示：卡片就是遥控器的操作入口'
-                                      : '手机/平板显示上一台、下一台与暂停/继续',
+                                      : controller.isDesktop
+                                          ? 'Windows：窗口未隐藏时在任务栏缩略图预览里显示控制栏'
+                                          : '手机/平板显示上一台、下一台与暂停/继续',
                                   value: s.listenModeShowCard,
                                   onChanged: (v) => controller.updateSettings(
                                       s.copyWith(listenModeShowCard: v)),
                                 ),
 
                                 _section('界面'),
-                                _switchTile(
-                                  icon: Icons.schedule,
-                                  title: '显示系统时间',
-                                  subtitle: '右上角常驻显示当前时间',
-                                  value: s.showClock,
-                                  onChanged: controller.setShowClock,
+                                // 「显示时间」只改独立时钟通知器（不触发整树重建），
+                                // 因此这里直接监听 clockVisible，开关状态点击后立即变化；
+                                // 否则要关掉设置面板重新打开才刷新
+                                ValueListenableBuilder<bool>(
+                                  valueListenable: controller.clockVisible,
+                                  builder: (context, clockOn, _) => _switchTile(
+                                    icon: Icons.schedule,
+                                    title: '显示系统时间',
+                                    subtitle: '右上角常驻显示当前时间',
+                                    value: clockOn,
+                                    onChanged: controller.setShowClock,
+                                  ),
                                 ),
                                 _sliderTile(
                                   icon: Icons.touch_app,

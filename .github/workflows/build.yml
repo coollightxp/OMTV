@@ -154,12 +154,23 @@ jobs:
                   /** 已在运行：后续只更新内容，避免安卓 12+ 后台启动前台服务限制 */
                   private var running = false
 
-                  fun start(ctx: Context, name: String, program: String, playing: Boolean) {
+                  fun start(
+                      ctx: Context,
+                      name: String,
+                      program: String,
+                      playing: Boolean,
+                      logo: String = "",
+                      logoKey: String = ""
+                  ) {
                       val i = Intent(ctx, AudioPlaybackService::class.java).apply {
                           action = "update"
                           putExtra("name", name)
                           putExtra("program", program)
                           putExtra("playing", playing)
+                          // 台标以 base64 传递：Bitmap 走 Intent 容易超
+                          // Binder 事务上限（大图直接抛 TransactionTooLarge）
+                          putExtra("logo", logo)
+                          putExtra("logoKey", logoKey)
                       }
                       try {
                           if (running) {
@@ -188,6 +199,20 @@ jobs:
               private var curName: String = ""
               private var curProgram: String = ""
               private var playing: Boolean = true
+
+              /** 当前频道台标（通知大图 + 锁屏封面）；key 不变则不重复解码 */
+              private var artBmp: Bitmap? = null
+              private var artKey: String = ""
+
+              private fun decodeLogo(b64: String): Bitmap? {
+                  if (b64.isEmpty()) return null
+                  return try {
+                      val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                      BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                  } catch (_: Exception) {
+                      null
+                  }
+              }
 
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -259,6 +284,11 @@ jobs:
                       curName = it.getStringExtra("name") ?: curName
                       curProgram = it.getStringExtra("program") ?: curProgram
                       playing = it.getBooleanExtra("playing", playing)
+                      val key = it.getStringExtra("logoKey") ?: ""
+                      if (key != artKey) {
+                          artKey = key
+                          artBmp = decodeLogo(it.getStringExtra("logo") ?: "")
+                      }
                   }
                   val n = buildNotification()
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -372,7 +402,8 @@ jobs:
                       .setShowWhen(false)
                       .setOngoing(true)
                       .setOnlyAlertOnce(true)
-                  appIcon()?.let { b.setLargeIcon(it) }
+                  // 右侧大图：当前电视台台标（无台标时退回应用图标）
+                  (artBmp ?: appIcon())?.let { b.setLargeIcon(it) }
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                       b.setStyle(
                           Notification.MediaStyle()
@@ -416,8 +447,8 @@ jobs:
                           MediaMetadata.METADATA_KEY_TITLE, curName.ifEmpty { "欧米电视" }
                       )
                       .putString(MediaMetadata.METADATA_KEY_ARTIST, curProgram)
-                  // 锁屏卡片和音乐播放器一样带封面（用应用图标）
-                  appIcon()?.let {
+                  // 锁屏卡片封面：当前电视台台标（无台标时退回应用图标）
+                  (artBmp ?: appIcon())?.let {
                       md.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it)
                       md.putBitmap(MediaMetadata.METADATA_KEY_ART, it)
                   }
@@ -576,7 +607,9 @@ jobs:
                                   this,
                                   call.argument<String>("name") ?: "",
                                   call.argument<String>("program") ?: "",
-                                  call.argument<Boolean>("playing") ?: true
+                                  call.argument<Boolean>("playing") ?: true,
+                                  call.argument<String>("logo") ?: "",
+                                  call.argument<String>("logoKey") ?: ""
                               )
                               result.success(true)
                           }
@@ -1001,6 +1034,9 @@ jobs:
             '// Channel uses raw UTF-8 bytes (Dart side: BasicMessageChannel<String>).',
             '#include <windows.h>',
             '#include <cstring>',
+            '#include <string>',
+            '#include <shellapi.h>   // NOTIFYICONDATAW / Shell_NotifyIconW（系统托盘）',
+            '#include <shobjidl.h>  // ITaskbarList3 / THUMBBUTTON（任务栏缩略图控制栏）',
             '#if __has_include(<flutter/flutter_messenger.h>)',
             '#include <flutter/flutter_messenger.h>',
             '#else',
@@ -1013,6 +1049,8 @@ jobs:
             '#endif',
             'namespace {',
             'FlutterDesktopMessengerRef g_om_messenger = nullptr;',
+            '// 听电视托盘/任务栏控制栏消息处理（定义在下方 shell 注入块）',
+            'void OMShellHandleMessage(const uint8_t* m, size_t n);',
             '// TRUE = intercept hotkeys; Dart sets FALSE while settings panel open.',
             'volatile BOOL g_om_capture = TRUE;',
             '// TRUE = hide cursor after 3s idle; Dart enables while web foreground.',
@@ -1042,7 +1080,9 @@ jobs:
             '                         void* user_data) {',
             '  if (message->message != nullptr && message->message_size >= 1) {',
             '    const uint8_t* m = message->message;',
-            '    if (m[0] == 0x43) {  // "C1"/"C0": cursor-hide enable/disable',
+            '    if (m[0] == 0x74) {  // "tray:" / "tb:" 听电视托盘/任务栏控制栏',
+            '      OMShellHandleMessage(m, static_cast<size_t>(message->message_size));',
+            '    } else if (m[0] == 0x43) {  // "C1"/"C0": cursor-hide enable/disable',
             '      g_om_cursor_hide =',
             '          (message->message_size >= 2 && m[1] == 0x31) ? TRUE : FALSE;',
             '      if (!g_om_cursor_hide) OMShowCursorAgain();',
@@ -1165,6 +1205,347 @@ jobs:
             '    }',
             '  }',
             '}',
+            '// ===== OMTV injected: 听电视托盘图标 + 任务栏缩略图控制栏 =====',
+            '// 隐藏窗口时任务栏按钮随之消失（缩略图工具栏必然看不见），因此两种',
+            '// 模式互斥：隐藏到托盘 = 托盘图标（双击恢复、右键菜单切台/暂停/退出',
+            '// 听电视）；显示信息卡片 = 任务栏缩略图控制栏（类似 MediaPlayer）。',
+            'HWND g_om_hwnd = nullptr;',
+            'WNDPROC g_om_orig_wndproc = nullptr;',
+            'bool g_om_tray_shown = false;',
+            'NOTIFYICONDATAW g_om_nid = {};',
+            'HICON g_om_app_icon = nullptr;',
+            'ITaskbarList3* g_om_taskbar = nullptr;',
+            'bool g_om_tb_registered = false;  // 同窗口只能 AddButtons 一次',
+            'bool g_om_tb_visible = false;',
+            'bool g_om_tb_playing = false;',
+            'HICON g_om_ico_prev = nullptr;',
+            'HICON g_om_ico_play = nullptr;',
+            'HICON g_om_ico_pause = nullptr;',
+            'HICON g_om_ico_next = nullptr;',
+            'const UINT kOmTrayMsg = WM_APP + 0x4F;',
+            'const int kOmIdPrev = 0x4F51;',
+            'const int kOmIdPlayPause = 0x4F52;',
+            'const int kOmIdNext = 0x4F53;',
+            'const int kOmIdRestore = 0x4F54;',
+            'const int kOmIdStop = 0x4F55;',
+            '// 托盘按钮/菜单命令统一回传 Dart（cmd:xxx）',
+            'void OMShellSendCmd(const char* cmd) {',
+            '  if (g_om_messenger == nullptr) return;',
+            '  char buf[64];',
+            '  const int n = ::wsprintfA(buf, "cmd:%s", cmd);',
+            '  if (n > 0) {',
+            '    ::FlutterDesktopMessengerSend(g_om_messenger, "omtv/win_hotkeys",',
+            '        reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(n));',
+            '  }',
+            '}',
+            'std::wstring OMUtf8ToWide(const std::string& s) {',
+            '  if (s.empty()) return std::wstring();',
+            '  const int len = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),',
+            '                                        static_cast<int>(s.size()),',
+            '                                        nullptr, 0);',
+            '  if (len <= 0) return std::wstring();',
+            '  std::wstring w(static_cast<size_t>(len), static_cast<wchar_t>(0));',
+            '  ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),',
+            '                        static_cast<int>(s.size()), &w[0], len);',
+            '  return w;',
+            '}',
+            '// 16x16 白色线条图标（上一台/播放/暂停/下一台）。',
+            '// 缩略图工具栏没有系统图标可用，这里用 GDI 自绘成 32bpp 带 alpha 的',
+            '// HICON；GDI 不写 alpha，绘制后把非黑像素统一置为不透明。',
+            'HICON OMMakeGlyphIcon(int kind) {',
+            '  const int kSize = 16;',
+            '  BITMAPV5HEADER bi = {};',
+            '  bi.bV5Size = sizeof(BITMAPV5HEADER);',
+            '  bi.bV5Width = kSize;',
+            '  bi.bV5Height = -kSize;  // 负数 = 自上而下，避免倒置',
+            '  bi.bV5Planes = 1;',
+            '  bi.bV5BitCount = 32;',
+            '  bi.bV5Compression = BI_BITFIELDS;',
+            '  bi.bV5RedMask = 0x00FF0000u;',
+            '  bi.bV5GreenMask = 0x0000FF00u;',
+            '  bi.bV5BlueMask = 0x000000FFu;',
+            '  bi.bV5AlphaMask = 0xFF000000u;',
+            '  HDC screen = ::GetDC(nullptr);',
+            '  void* bits = nullptr;',
+            '  HBITMAP dib = ::CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&bi),',
+            '                                   DIB_RGB_COLORS, &bits, nullptr, 0);',
+            '  if (dib == nullptr || bits == nullptr) {',
+            '    ::ReleaseDC(nullptr, screen);',
+            '    return nullptr;',
+            '  }',
+            '  HDC dc = ::CreateCompatibleDC(screen);',
+            '  ::SelectObject(dc, dib);',
+            '  ::PatBlt(dc, 0, 0, kSize, kSize, BLACKNESS);',
+            '  HBRUSH brush = ::CreateSolidBrush(RGB(255, 255, 255));',
+            '  ::SelectObject(dc, brush);',
+            '  ::SelectObject(dc, ::GetStockObject(NULL_PEN));',
+            '  switch (kind) {',
+            '    case 0: {  // 上一台：左三角 + 竖条',
+            '      ::Rectangle(dc, 2, 3, 5, 13);',
+            '      POINT p[3] = {{14, 3}, {14, 13}, {6, 8}};',
+            '      ::Polygon(dc, p, 3);',
+            '      break;',
+            '    }',
+            '    case 2: {  // 暂停：两根竖条',
+            '      ::Rectangle(dc, 4, 3, 7, 13);',
+            '      ::Rectangle(dc, 9, 3, 12, 13);',
+            '      break;',
+            '    }',
+            '    case 3: {  // 下一台：右三角 + 竖条',
+            '      POINT p[3] = {{2, 3}, {10, 8}, {2, 13}};',
+            '      ::Polygon(dc, p, 3);',
+            '      ::Rectangle(dc, 11, 3, 14, 13);',
+            '      break;',
+            '    }',
+            '    default: {  // 播放：右三角',
+            '      POINT p[3] = {{4, 2}, {14, 8}, {4, 14}};',
+            '      ::Polygon(dc, p, 3);',
+            '      break;',
+            '    }',
+            '  }',
+            '  ::GdiFlush();',
+            '  DWORD* px = static_cast<DWORD*>(bits);',
+            '  for (int i = 0; i < kSize * kSize; ++i) {',
+            '    if ((px[i] & 0x00FFFFFFu) != 0) px[i] = 0xFFFFFFFFu;',
+            '  }',
+            '  HBITMAP mask = ::CreateBitmap(kSize, kSize, 1, 1, nullptr);',
+            '  HDC mask_dc = ::CreateCompatibleDC(dc);',
+            '  ::SelectObject(mask_dc, mask);',
+            '  ::PatBlt(mask_dc, 0, 0, kSize, kSize, WHITENESS);',
+            '  ICONINFO info = {};',
+            '  info.fIcon = TRUE;',
+            '  info.hbmMask = mask;',
+            '  info.hbmColor = dib;',
+            '  HICON icon = ::CreateIconIndirect(&info);',
+            '  ::DeleteDC(mask_dc);',
+            '  ::DeleteObject(mask);',
+            '  ::DeleteDC(dc);',
+            '  ::DeleteObject(dib);',
+            '  ::DeleteObject(brush);',
+            '  ::ReleaseDC(nullptr, screen);',
+            '  return icon;',
+            '}',
+            'void OMTrayRemove() {',
+            '  if (!g_om_tray_shown) return;',
+            '  ::Shell_NotifyIconW(NIM_DELETE, &g_om_nid);',
+            '  g_om_tray_shown = false;',
+            '}',
+            'void OMTrayAdd(const std::wstring& tip) {',
+            '  if (g_om_hwnd == nullptr) return;',
+            '  if (g_om_app_icon == nullptr) {',
+            '    g_om_app_icon = ::LoadIconW(::GetModuleHandleW(nullptr),',
+            '                                MAKEINTRESOURCEW(101));',
+            '    if (g_om_app_icon == nullptr) {',
+            '      g_om_app_icon = ::LoadIconW(nullptr, IDI_APPLICATION);',
+            '    }',
+            '  }',
+            '  NOTIFYICONDATAW nid = {};',
+            '  nid.cbSize = sizeof(NOTIFYICONDATAW);',
+            '  nid.hWnd = g_om_hwnd;',
+            '  nid.uID = 1;',
+            '  nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;',
+            '  nid.uCallbackMessage = kOmTrayMsg;',
+            '  nid.hIcon = g_om_app_icon;',
+            '  ::lstrcpynW(nid.szTip, tip.c_str(), ARRAYSIZE(nid.szTip));',
+            '  if (nid.szTip[0] == 0) {',
+            '    ::lstrcpynW(nid.szTip, L"OMTV 听电视", ARRAYSIZE(nid.szTip));',
+            '  }',
+            '  // 已存在只改内容（避免先删后加在托盘闪烁/残留僵尸图标）',
+            '  if (g_om_tray_shown) {',
+            '    ::Shell_NotifyIconW(NIM_MODIFY, &nid);',
+            '  } else {',
+            '    ::Shell_NotifyIconW(NIM_ADD, &nid);',
+            '    g_om_tray_shown = true;',
+            '  }',
+            '  g_om_nid = nid;',
+            '}',
+            'void OMTaskbarEnsure() {',
+            '  if (g_om_taskbar != nullptr) return;',
+            '  // CLSID 直接写字面量，避免依赖 uuid.lib 里的 CLSID_TaskbarList',
+            '  static const CLSID kClsid = {',
+            '      0x56FDF344, 0xFD6D, 0x11D0,',
+            '      {0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90}};',
+            '  ITaskbarList3* tb = nullptr;',
+            '  const HRESULT hr = ::CoCreateInstance(kClsid, nullptr,',
+            '      CLSCTX_INPROC_SERVER, __uuidof(ITaskbarList3),',
+            '      reinterpret_cast<void**>(&tb));',
+            '  if (hr != S_OK || tb == nullptr) return;',
+            '  if (tb->HrInit() != S_OK) {',
+            '    tb->Release();',
+            '    return;',
+            '  }',
+            '  g_om_taskbar = tb;',
+            '}',
+            'void OMTaskbarFill(THUMBBUTTON* b, UINT id, HICON icon,',
+            '                   const wchar_t* tip) {',
+            '  b->iId = id;',
+            '  b->dwMask = static_cast<THUMBBUTTONMASK>(THB_ICON | THB_TOOLTIP | THB_FLAGS);',
+            '  b->dwFlags = THBF_ENABLED;',
+            '  b->hIcon = icon;',
+            '  ::lstrcpynW(b->szTip, tip, ARRAYSIZE(b->szTip));',
+            '}',
+            'void OMTaskbarUpdate(bool playing) {',
+            '  if (g_om_taskbar == nullptr || !g_om_tb_visible) return;',
+            '  g_om_tb_playing = playing;',
+            '  if (g_om_ico_play == nullptr) g_om_ico_play = OMMakeGlyphIcon(1);',
+            '  if (g_om_ico_pause == nullptr) g_om_ico_pause = OMMakeGlyphIcon(2);',
+            '  THUMBBUTTON b = {};',
+            '  OMTaskbarFill(&b, static_cast<UINT>(kOmIdPlayPause),',
+            '                playing ? g_om_ico_pause : g_om_ico_play,',
+            '                playing ? L"暂停" : L"播放");',
+            '  g_om_taskbar->ThumbBarUpdateButtons(g_om_hwnd, 1, &b);',
+            '}',
+            'void OMTaskbarAdd(bool playing) {',
+            '  if (g_om_hwnd == nullptr) return;',
+            '  OMTaskbarEnsure();',
+            '  if (g_om_taskbar == nullptr) return;',
+            '  if (g_om_ico_prev == nullptr) g_om_ico_prev = OMMakeGlyphIcon(0);',
+            '  if (g_om_ico_next == nullptr) g_om_ico_next = OMMakeGlyphIcon(3);',
+            '  if (g_om_ico_play == nullptr) g_om_ico_play = OMMakeGlyphIcon(1);',
+            '  if (g_om_ico_pause == nullptr) g_om_ico_pause = OMMakeGlyphIcon(2);',
+            '  THUMBBUTTON buttons[3] = {};',
+            '  OMTaskbarFill(&buttons[0], static_cast<UINT>(kOmIdPrev),',
+            '                g_om_ico_prev, L"上一台");',
+            '  OMTaskbarFill(&buttons[1], static_cast<UINT>(kOmIdPlayPause),',
+            '                playing ? g_om_ico_pause : g_om_ico_play,',
+            '                playing ? L"暂停" : L"播放");',
+            '  OMTaskbarFill(&buttons[2], static_cast<UINT>(kOmIdNext),',
+            '                g_om_ico_next, L"下一台");',
+            '  if (!g_om_tb_registered) {',
+            '    // 窗口必须已显示且已有任务栏按钮，否则本次调用失败（下次更新重试）',
+            '    if (g_om_taskbar->ThumbBarAddButtons(g_om_hwnd, 3, buttons) != S_OK) {',
+            '      return;',
+            '    }',
+            '    g_om_tb_registered = true;',
+            '  } else {',
+            '    // 已经注册过：重新显示只能走 Update（同窗口 AddButtons 只能一次）',
+            '    g_om_taskbar->ThumbBarUpdateButtons(g_om_hwnd, 3, buttons);',
+            '  }',
+            '  g_om_tb_visible = true;',
+            '  g_om_tb_playing = playing;',
+            '}',
+            'void OMTaskbarHide() {',
+            '  if (g_om_taskbar == nullptr || !g_om_tb_visible) return;',
+            '  THUMBBUTTON buttons[3] = {};',
+            '  for (int i = 0; i < 3; ++i) {',
+            '    buttons[i].iId = static_cast<UINT>(',
+            '        i == 0 ? kOmIdPrev : (i == 1 ? kOmIdPlayPause : kOmIdNext));',
+            '    buttons[i].dwMask = static_cast<THUMBBUTTONMASK>(THB_FLAGS);',
+            '    buttons[i].dwFlags = THBF_HIDDEN;',
+            '  }',
+            '  g_om_taskbar->ThumbBarUpdateButtons(g_om_hwnd, 3, buttons);',
+            '  g_om_tb_visible = false;',
+            '}',
+            'void OMShellShowWindowFromTray() {',
+            '  if (g_om_hwnd == nullptr) return;',
+            '  ::ShowWindow(g_om_hwnd, SW_SHOW);',
+            '  ::ShowWindow(g_om_hwnd, SW_RESTORE);',
+            '  ::SetForegroundWindow(g_om_hwnd);',
+            '  OMTrayRemove();',
+            '}',
+            'void OMTrayShowMenu() {',
+            '  if (g_om_hwnd == nullptr) return;',
+            '  HMENU menu = ::CreatePopupMenu();',
+            '  if (menu == nullptr) return;',
+            '  ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(kOmIdRestore),',
+            '                L"显示窗口");',
+            '  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);',
+            '  ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(kOmIdPrev),',
+            '                L"上一台");',
+            '  ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(kOmIdPlayPause),',
+            '                g_om_tb_playing ? L"暂停" : L"播放");',
+            '  ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(kOmIdNext),',
+            '                L"下一台");',
+            '  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);',
+            '  ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(kOmIdStop),',
+            '                L"退出听电视");',
+            '  POINT pt = {};',
+            '  ::GetCursorPos(&pt);',
+            '  // 菜单弹出前必须先激活窗口，否则点击菜单外部不会自动消失',
+            '  ::SetForegroundWindow(g_om_hwnd);',
+            '  ::TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y,',
+            '                   0, g_om_hwnd, nullptr);',
+            '  ::PostMessageW(g_om_hwnd, WM_NULL, 0, 0);',
+            '  ::DestroyMenu(menu);',
+            '}',
+            'LRESULT CALLBACK OMShellWndProc(HWND hwnd, UINT msg, WPARAM w_param,',
+            '                                LPARAM l_param) {',
+            '  if (msg == WM_COMMAND) {',
+            '    const int id = static_cast<int>(LOWORD(w_param));',
+            '    if (id == kOmIdPrev) { OMShellSendCmd("prev"); return 0; }',
+            '    if (id == kOmIdPlayPause) { OMShellSendCmd("playpause"); return 0; }',
+            '    if (id == kOmIdNext) { OMShellSendCmd("next"); return 0; }',
+            '    if (id == kOmIdRestore) {',
+            '      // 先把窗口拉回来（视觉上立即响应），再让 Dart 退出听电视，',
+            '      // 避免 Dart 侧仍停留在“窗口已隐藏”状态',
+            '      OMShellShowWindowFromTray();',
+            '      OMShellSendCmd("restore");',
+            '      return 0;',
+            '    }',
+            '    if (id == kOmIdStop) {',
+            '      OMShellShowWindowFromTray();',
+            '      OMShellSendCmd("stop");',
+            '      return 0;',
+            '    }',
+            '  } else if (msg == kOmTrayMsg) {',
+            '    if (l_param == WM_LBUTTONDBLCLK) {',
+            '      // 双击托盘 = 显示窗口（同时通知 Dart 退出听电视，恢复画面）',
+            '      OMShellShowWindowFromTray();',
+            '      OMShellSendCmd("restore");',
+            '    } else if (l_param == WM_RBUTTONUP) {',
+            '      OMTrayShowMenu();',
+            '    }',
+            '    return 0;',
+            '  }',
+            '  return ::CallWindowProc(g_om_orig_wndproc, hwnd, msg, w_param, l_param);',
+            '}',
+            'void OMShellAttach(HWND hwnd) {',
+            '  if (hwnd == nullptr) return;',
+            '  g_om_hwnd = hwnd;',
+            '  if (g_om_orig_wndproc == nullptr) {',
+            '    g_om_orig_wndproc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(',
+            '        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&OMShellWndProc)));',
+            '  }',
+            '}',
+            '// Dart -> C++（UTF-8）：',
+            '//   tray:add:<tip>   加托盘图标（窗口仍可见）',
+            '//   tray:del         删托盘图标',
+            '//   tray:hide:<tip>  加托盘图标并隐藏窗口（隐藏后任务栏按钮消失）',
+            '//   tray:show        从托盘恢复窗口',
+            '//   tb:add:0|1       任务栏缩略图控制栏（1=正在播放）',
+            '//   tb:state:0|1     刷新控制栏播放/暂停图标',
+            '//   tb:del           隐藏控制栏',
+            'void OMShellHandleMessage(const uint8_t* m, size_t n) {',
+            '  const std::string s(reinterpret_cast<const char*>(m), n);',
+            '  if (s == "tray:del") {',
+            '    OMTrayRemove();',
+            '    return;',
+            '  }',
+            '  if (s == "tray:show") {',
+            '    OMShellShowWindowFromTray();',
+            '    return;',
+            '  }',
+            '  if (s.compare(0, 9, "tray:add:") == 0) {',
+            '    OMTrayAdd(OMUtf8ToWide(s.substr(9)));',
+            '    return;',
+            '  }',
+            '  if (s.compare(0, 10, "tray:hide:") == 0) {',
+            '    OMTrayAdd(OMUtf8ToWide(s.substr(10)));',
+            '    if (g_om_hwnd != nullptr) ::ShowWindow(g_om_hwnd, SW_HIDE);',
+            '    return;',
+            '  }',
+            '  if (s.compare(0, 7, "tb:add:") == 0) {',
+            '    OMTaskbarAdd(s.size() > 7 && s[7] == 0x31);',
+            '    return;',
+            '  }',
+            '  if (s.compare(0, 9, "tb:state:") == 0) {',
+            '    OMTaskbarUpdate(s.size() > 9 && s[9] == 0x31);',
+            '    return;',
+            '  }',
+            '  if (s == "tb:del") {',
+            '    OMTaskbarHide();',
+            '  }',
+            '}',
             '}  // namespace',
             '// ===== end injected code ====='
           ) -join "`r`n"
@@ -1184,7 +1565,9 @@ jobs:
             '                      ::GetModuleHandleW(nullptr), 0);',
             '  ::SetWindowsHookExW(WH_MOUSE_LL, &OMLowLevelMouseProc,',
             '                      ::GetModuleHandleW(nullptr), 0);',
-            '  ::SetTimer(nullptr, 0x4F43, 500, OMCursorTimerProc);'
+            '  ::SetTimer(nullptr, 0x4F43, 500, OMCursorTimerProc);',
+            '  // OMTV: 子类化窗口，接管听电视托盘图标与任务栏缩略图控制栏消息',
+            '  OMShellAttach(this->GetHandle());'
           ) -join "`r`n"
           $wt = $wt.Replace($wIncAnchor, $wInc).Replace($wRegAnchor, $wReg)
           [System.IO.File]::WriteAllText($fw, $wt, (New-Object System.Text.UTF8Encoding($false)))
@@ -1219,15 +1602,7 @@ jobs:
           [System.IO.File]::WriteAllText($cm, $ct, (New-Object System.Text.UTF8Encoding($false)))
           'CMake: injected experimental coroutine silence define'
 
-      # ===== 包一：标准包（使用系统 WebView2 运行时）=====
-      # CEF 插件 DLL 静态依赖 libcef.dll，没随包携带内核的包不能链接它；
-      # 这里临时去掉依赖并把 CEF 实现换成空实现，构建后从 git 恢复。
-      - name: Prepare standard build (drop CEF engine)
-        shell: pwsh
-        run: |
-          flutter pub remove webview_cef
-          Copy-Item .github/cef_engine_stub.dart lib/services/web_engine_cef.dart -Force
-
+      # ===== Windows 标准包（使用系统 WebView2 运行时）=====
       - name: Install dependencies
         run: flutter pub get
 
@@ -1243,119 +1618,17 @@ jobs:
             Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMTV-windows.zip
           }
 
-      # ===== 包二：CEF 包（随包携带 Chromium 内核，不依赖系统 WebView2）=====
-      # 恢复真实 CEF 实现与依赖，再给 main.cpp 注入 CEF 子进程/消息循环钩子
-      # （钩子必须在 wWinMain 第一句，子进程才能正确复用同一 exe）
-      - name: Restore CEF sources
-        shell: bash
-        run: git checkout -- pubspec.yaml lib/services/web_engine_cef.dart
-
-      - name: Patch Windows runner for CEF
-        shell: pwsh
-        run: |
-          $f = 'windows/runner/main.cpp'
-          $t = [System.IO.File]::ReadAllText($f)
-          # Flutter 模板 main.cpp 只 include flutter_window.h / utils.h；
-          # generated_plugin_registrant.h 在 flutter_window.cpp 里，别锚错文件
-          $incAnchor = '#include "flutter_window.h"'
-          if (-not $t.Contains($incAnchor)) {
-            throw 'main.cpp include anchor not found'
-          }
-          $t = $t.Replace($incAnchor,
-            $incAnchor + "`r`n" + '#include "webview_cef/webview_cef_plugin_c_api.h"')
-          # wWinMain 第一条语句：初始化 CEF 子进程（返回 >=0 表示本次是子进程）
-          $sig = [regex]::Match($t, 'int APIENTRY wWinMain\([^)]*\)\s*\{')
-          if (-not $sig.Success) { throw 'wWinMain signature anchor not found' }
-          $init = @(
-            '',
-            '  // OMTV CEF: 子进程（渲染/GPU/工具进程）复用同一个 exe，必须最先执行；',
-            '  // 返回 >=0 表示本次是 CEF 子进程，处理完立即退出',
-            '  int om_cef_exit = initCEFProcesses(instance);',
-            '  if (om_cef_exit >= 0) {',
-            '    return om_cef_exit;',
-            '  }'
-          ) -join "`r`n"
-          $t = $t.Insert($sig.Index + $sig.Length, $init)
-          # 消息循环把消息转发给 CEF（键盘输入、IME 与引擎线程投递都依赖它）
-          $loop = [regex]::Match(
-            $t, 'while\s*\(\s*::GetMessage\(\s*&msg,\s*nullptr,\s*0,\s*0\s*\)\s*\)\s*\{')
-          if (-not $loop.Success) { throw 'main.cpp message loop anchor not found' }
-          $t = $t.Insert($loop.Index + $loop.Length, "`r`n" +
-            '    handleWndProcForCEF(msg.hwnd, msg.message, msg.wParam, msg.lParam);')
-          [System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($false)))
-          Get-Content $f | Select-String 'CEF' | ForEach-Object { $_.Line.Trim() }
-
-      # 插件首次构建会下载官方 CEF Standard Distribution（约 330MB）并从源码
-      # 编译 libcef_dll_wrapper，CEF 包构建时间明显长于标准包
-      - name: Clean for CEF build
-        run: flutter clean
-
-      - name: Install CEF dependencies
-        run: flutter pub get
-
-      # webview_cef 默认走 GPU 零拷贝纹理（CEF OnAcceleratedPaint → D3D11 共享
-      # 纹理 → Flutter GPU surface）。但该构建没有 OnPaint 回退：一旦 CEF 在
-      # 用户机器上退回软件渲染（GPU 进程被拦/崩溃、驱动不支持、远程桌面等），
-      # OnPaint 帧没有接收者，网页频道永久黑屏（仅 stderr 一条 5 秒警告）。
-      # CEF 包统一改走软件像素缓冲路径（OnPaint → CPU 纹理），牺牲一点性能
-      # 换全环境可用
-      - name: Force software rendering for CEF package
-        shell: pwsh
-        run: |
-          $cm = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\*\webview_cef-*\windows\CMakeLists.txt" |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $cm) { throw 'webview_cef CMakeLists.txt not found in pub cache' }
-          $t = [System.IO.File]::ReadAllText($cm)
-          $anchor = 'option(WEBVIEW_CEF_GPU_TEXTURE "Use the zero-copy GPU texture rendering path" ON)'
-          if (-not $t.Contains($anchor)) { throw 'GPU texture option anchor not found' }
-          $t = $t.Replace($anchor,
-            'option(WEBVIEW_CEF_GPU_TEXTURE "Use the zero-copy GPU texture rendering path" OFF)')
-          [System.IO.File]::WriteAllText($cm, $t, (New-Object System.Text.UTF8Encoding($false)))
-          Select-String -Path $cm -Pattern 'WEBVIEW_CEF_GPU_TEXTURE' | ForEach-Object { $_.Line.Trim() }
-
-      # 【临时诊断】用户机器 CEF 包黑屏但 debug.log 无任何错误、子进程正常，
-      # 需要 verbose 日志（含页面加载/导航记录）+ 远程调试端口定位是
-      # 页面没加载 还是 帧没显示。定位完成后应回退本步骤
-      - name: Enable CEF diagnostics (temporary)
-        shell: pwsh
-        run: |
-          $pp = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\*\webview_cef-*\common\webview_plugin.cc" |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $pp) { throw 'webview_plugin.cc not found in pub cache' }
-          $t = [System.IO.File]::ReadAllText($pp)
-          $anchor = 'cefs.multi_threaded_message_loop = true;'
-          if (-not $t.Contains($anchor)) { throw 'startCEF anchor not found' }
-          $t = $t.Replace($anchor, $anchor + "`r`n`t`t`tcefs.log_severity = LOGSEVERITY_VERBOSE;`r`n`t`t`tcefs.remote_debugging_port = 9222;")
-          [System.IO.File]::WriteAllText($pp, $t, (New-Object System.Text.UTF8Encoding($false)))
-          Select-String -Path $pp -Pattern 'log_severity|remote_debugging_port' | ForEach-Object { $_.Line.Trim() }
-
-      - name: Build Windows CEF
-        run: flutter build windows --release --dart-define=OMTV_CEF=true
-
-      - name: Zip Windows CEF build
-        shell: pwsh
-        run: |
-          if (Get-Command 7z -ErrorAction SilentlyContinue) {
-            7z a -tzip -mx=5 OMTV-windows-cef.zip .\build\windows\x64\runner\Release\* | Out-Null
-          } else {
-            Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath OMTV-windows-cef.zip
-          }
-
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: |
-            OMTV-windows.zip
-            OMTV-windows-cef.zip
+          path: OMTV-windows.zip
 
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            OMTV-windows.zip
-            OMTV-windows-cef.zip
+          files: OMTV-windows.zip
 
   # ==================== Linux Desktop ====================
   build-linux:
@@ -1389,13 +1662,6 @@ jobs:
       # 窗口标题沿用 flutter create 写入的工程名，改为 OMTV
       - name: Patch Linux window title
         run: sed -i 's/"omtv"/"OMTV"/g' linux/runner/my_application.cc
-
-      # Linux 不使用 CEF 包：去掉 webview_cef 依赖并换成空实现，
-      # 避免 Linux 端也去下载/编译 330MB 的 CEF 内核
-      - name: Drop CEF engine (Linux)
-        run: |
-          flutter pub remove webview_cef
-          cp .github/cef_engine_stub.dart lib/services/web_engine_cef.dart
 
       - name: Install dependencies
         run: flutter pub get

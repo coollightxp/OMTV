@@ -123,7 +123,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.20';
+  static const String _appVersion = '1.0.21';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -210,16 +210,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
   }
 
-  /// 释放网页引擎：WebView2 版释放环境及其宿主子进程（避免退出后
-  /// 残留进程继续解码占资源，Win10 家庭版报"已停止工作"）；CEF 版
-  /// 关闭浏览器与子进程
+  /// 释放网页引擎：释放 WebView2 环境及其宿主子进程（避免退出后
+  /// 残留进程继续解码占资源，Win10 家庭版报"已停止工作"）
   Future<void> _releaseWebEngine() async {
-    if (kUseCefWebEngine) {
-      try {
-        await quitWebChannelEngine();
-      } catch (_) {}
-      return;
-    }
     try {
       await webViewEnvironment?.dispose();
     } catch (_) {}
@@ -514,6 +507,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                         key: ValueKey(webUrl),
                         url: webUrl,
                         title: controller.currentChannel?.name ?? '',
+                        reloadSerial: controller.webReloadSerial,
                         foreground: controller.webPageForeground,
                         onForeground: () =>
                             controller.setWebForeground(true),
@@ -3212,6 +3206,10 @@ class _WebChannelOverlay extends StatefulWidget {
   /// 网页是否已处于前台播放（false=后台缓冲，被黑屏占位覆盖）
   final bool foreground;
 
+  /// 重载序号：控制器每次点「重载」+1，本控件据此整体复位
+  /// 起播/嗅探决策状态并重新计时（否则重载后页面已出声仍不推前台）
+  final int reloadSerial;
+
   /// 探测到有声起播，请求父层把网页推到前台
   final VoidCallback onForeground;
 
@@ -3238,6 +3236,7 @@ class _WebChannelOverlay extends StatefulWidget {
     super.key,
     required this.url,
     required this.title,
+    required this.reloadSerial,
     required this.foreground,
     required this.onForeground,
     required this.onWebKey,
@@ -3260,7 +3259,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
 
   /// 诊断用：加载进度分桶（25/50/75/100）去重，避免每帧进度回调刷屏
   int _progBucket = 0;
-  /// 网页引擎控制桥（WebView2 / CEF 由 web_engine 抽象层统一提供）
+  /// 网页引擎控制桥（由 web_engine 抽象层提供）
   WebChannelController? _webController;
 
   /// 后台缓冲期间每秒探测一次页面 <video> 的真实起播状态
@@ -5678,6 +5677,28 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 卡死看门狗（前台播放态才工作；设置里可关闭）
     _stallTimer =
         Timer.periodic(const Duration(seconds: 3), (_) => _checkStall());
+    // 站点脚本提前注入 + 8 秒兜底 + 15 秒决策窗口（重载后同样要重新计时）
+    _armFallbackTimers();
+    // 运行时缺失判定（乐观策略）：注册表/版本查询在不同系统上都不可靠
+    // （实测已装 WebView2 的家庭版也会误报）。只要 WebView 能报告任何
+    // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
+    // 放宽到 25 秒：慢站点 + 弱网下 15 秒易误判"未安装"，导致程序
+    // 状态不一致、退出时 WebView 未正确释放进而崩溃。
+    _runtimeTimer = Timer(const Duration(seconds: 25), () {
+      if (mounted && !_sawProgress && _error == null) {
+        WebDiag.log('runtime_missing');
+        setState(() => _runtimeMissing = true);
+      }
+    });
+  }
+
+  /// 站点脚本提前注入 + 8 秒兜底 + 15 秒决策窗口。
+  /// 首次创建与「重载」后都要调用，避免重载后没有任何兜底定时器
+  /// （页面重新加载却永远停在黑屏遮罩）。
+  void _armFallbackTimers() {
+    _siteInjectTimer?.cancel();
+    _forceForegroundTimer?.cancel();
+    _decisionTimer?.cancel();
     // 站点页提前注入：站点脚本（芒果/央视频）原来只在 onLoadStop 注入，
     // 而慢站首屏 load_stop 迟迟不来（8 秒时进度仍 66%）导致脚本永不注入、
     // 永不点台、页面永不挂 video。2.5 秒先注入一次，脚本自带点台重试轮询；
@@ -5722,20 +5743,36 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     // 最终决策窗口：15 秒仍无可直连主流 → 加密/无流，直接网页全屏
     _decisionTimer = Timer(const Duration(seconds: 15),
         () => _finishWithWeb(via: 'decision15'));
-    // 运行时缺失判定（乐观策略）：注册表/版本查询在不同系统上都不可靠
-    // （实测已装 WebView2 的家庭版也会误报）。只要 WebView 能报告任何
-    // 加载进度，就证明运行时正常；25 秒内毫无进展才提示安装。
-    // 放宽到 25 秒：慢站点 + 弱网下 15 秒易误判"未安装"，导致程序
-    // 状态不一致、退出时 WebView 未正确释放进而崩溃。
-    // CEF 包内核随程序自带，不存在「缺少运行时」的情况，跳过该判定
-    if (!kUseCefWebEngine) {
-      _runtimeTimer = Timer(const Duration(seconds: 25), () {
-        if (mounted && !_sawProgress && _error == null) {
-          WebDiag.log('runtime_missing');
-          setState(() => _runtimeMissing = true);
-        }
-      });
-    }
+  }
+
+  /// 网页频道被「重载」（底部面板重载按钮）：页面已重新开始加载，
+  /// 起播/嗅探决策状态必须整体复位并重新计时。否则旧状态残留
+  /// （_sniffDone / _webPlayReady 仍为 true）会让页面重新出声后
+  /// 永远推不到前台——后台有声音、前台一直显示「正在打开网页播放」。
+  void _resetForReload() {
+    WebDiag.log('reload_reset', 'fg=${widget.foreground ? 1 : 0}');
+    _webReadyGraceTimer?.cancel();
+    _webReadyGraceTimer = null;
+    _sniffAggTimer?.cancel();
+    _sniffAggTimer = null;
+    _sniffDeadline?.cancel();
+    _sniffDeadline = null;
+    _loaded = false;
+    _error = null;
+    _progBucket = 0;
+    _webPlayReady = false;
+    _sniffChecking = false;
+    _sniffDone = false;
+    // 重载后的新页面回到零 hook 纯净环境（嗅探脚本随旧页面一起消失）
+    _sniffEnabled = false;
+    _sniffRetried = false;
+    _sniffCandidates.clear();
+    _pageVideoCount = 0;
+    _siteRetryTick = 0;
+    _siteRetryCount = 0;
+    _stallTicks = 0;
+    _lastVideoCt = -1;
+    _armFallbackTimers();
   }
 
   @override
@@ -5747,7 +5784,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
     if (c != null) {
       WebDiag.log('wv_dispose');
       try {
-        c.release(); // 关闭底层原生网页实例（WebView2 / CEF 由抽象层分派）
+        c.release(); // 关闭底层原生网页实例
       } catch (_) {}
     }
     WebDiag.end();
@@ -6000,6 +6037,11 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
   @override
   void didUpdateWidget(covariant _WebChannelOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 用户点了「重载」：页面重新加载，先把起播/嗅探状态整体复位
+    if (widget.reloadSerial != oldWidget.reloadSerial) {
+      _resetForReload();
+      return;
+    }
     // 已推到前台（探测成功或超时兜底）后不再需要超时定时器
     if (widget.foreground && !oldWidget.foreground) {
       _forceForegroundTimer?.cancel();
@@ -6116,7 +6158,7 @@ class _WebChannelOverlayState extends State<_WebChannelOverlay> {
             } catch (_) {}
           },
           onProgress: (progress) {
-            // 能收到任何进度都说明引擎工作正常（CEF 包固定给 10/100）
+            // 能收到任何进度都说明引擎工作正常
             if (progress > 0 && !_sawProgress) {
               WebDiag.log('progress_first', 'v=$progress');
             }
