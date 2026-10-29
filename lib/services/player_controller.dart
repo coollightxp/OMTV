@@ -1857,6 +1857,10 @@ class PlayerController extends ChangeNotifier {
   /// 托盘图标是否已添加（隐藏窗口后由托盘提供操作入口）
   bool _trayShown = false;
 
+  /// 进入听电视前是否处于全屏：任务栏缩略图控制栏挂在窗口的任务栏
+  /// 按钮上，全屏会把任务栏整个盖住，必须先退出全屏，退出听电视时恢复
+  bool _listenWasFullscreen = false;
+
   /// 听电视卡片/托盘/任务栏按钮的统一命令入口
   Future<void> _onListenCommand(String cmd) async {
     switch (cmd) {
@@ -1907,7 +1911,10 @@ class PlayerController extends ChangeNotifier {
         _isWindows &&
         _settings.listenModeShowCard) {
       // Windows 不隐藏窗口时：任务栏缩略图控制栏（类似 MediaPlayer
-      // 悬停预览里的控制条）承担信息卡片职责
+      // 悬停预览里的控制条）承担信息卡片职责。
+      // 全屏时任务栏被完全盖住、也没有缩略图预览，先退出全屏
+      _listenWasFullscreen = _isFullscreen;
+      await exitFullscreenIfNeeded();
       await WinHotkeys().taskbarShow(playing: isPlaying);
     } else if (!kIsWeb &&
         _settings.listenModeHideWindow &&
@@ -1952,6 +1959,15 @@ class PlayerController extends ChangeNotifier {
         await windowManager.show();
         await windowManager.focus();
       } catch (_) {}
+      if (_listenWasFullscreen) {
+        // 进入听电视时为显示任务栏控制栏退出过全屏，这里恢复全屏观看
+        _listenWasFullscreen = false;
+        try {
+          _isFullscreen = true;
+          await windowManager.setFullScreen(true);
+          await _applyAlwaysOnTop();
+        } catch (_) {}
+      }
     }
     notifyListeners();
   }
