@@ -146,7 +146,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                   subtitle: controller.isTv
                                       ? '电视端固定显示：卡片就是遥控器的操作入口'
                                       : controller.isDesktop
-                                          ? 'Windows：窗口未隐藏时在任务栏缩略图预览里显示控制栏'
+                                          ? 'Windows：窗口缩到任务栏，悬停任务栏图标即可在预览里切台/暂停（与上面的隐藏窗口互斥）'
                                           : '手机/平板显示上一台、下一台与暂停/继续',
                                   value: s.listenModeShowCard,
                                   onChanged: (v) => controller.updateSettings(

@@ -123,7 +123,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.22';
+  static const String _appVersion = '1.0.23';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -810,6 +810,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       ),
                     ),
 
+                  // 听电视信息卡片（手机/平板，可在设置中关闭；
+                  // 电视端没有通知栏可操作，强制显示卡片作为唯一控制面）
+                  // 必须放在顶部悬停标题栏【之下】，否则整屏渐变会盖住标题栏，
+                  // 听电视状态下鼠标移到顶部看不到标题栏
+                  if (controller.listenMode &&
+                      (controller.settings.listenModeShowCard ||
+                          controller.isTv))
+                    _ListenCard(controller: controller),
+
                   // 顶部悬停标题栏（桌面端，置于最顶层，
                   // 避免被右上角时钟/切台 OSD 遮挡导致点不到）
                   // 频道抽屉 / EPG / 设置打开时不显示，以免挡住它们
@@ -834,13 +843,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
                       top: 48,
                       child: IgnorePointer(child: _LockBadge()),
                     ),
-
-                  // 听电视信息卡片（手机/平板，可在设置中关闭；
-                  // 电视端没有通知栏可操作，强制显示卡片作为唯一控制面）
-                  if (controller.listenMode &&
-                      (controller.settings.listenModeShowCard ||
-                          controller.isTv))
-                    _ListenCard(controller: controller),
 
                   // 锁定层：吞掉全部触摸/鼠标操作（播放页/面板/听电视卡片
                   // 均不响应，视觉提示仍在下方可见）；返回键 / Esc / L 键解锁

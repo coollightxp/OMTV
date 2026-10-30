@@ -1910,12 +1910,15 @@ class PlayerController extends ChangeNotifier {
     } else if (isDesktop &&
         _isWindows &&
         _settings.listenModeShowCard) {
-      // Windows 不隐藏窗口时：任务栏缩略图控制栏（类似 MediaPlayer
-      // 悬停预览里的控制条）承担信息卡片职责。
-      // 全屏时任务栏被完全盖住、也没有缩略图预览，先退出全屏
+      // Windows 不隐藏窗口时：窗口缩到任务栏，操作入口放在任务栏
+      // 缩略图预览控制栏（类似 MediaPlayer 的悬停控制条）。
+      // 全屏会盖住任务栏且没有缩略图预览，先退出全屏再最小化
       _listenWasFullscreen = _isFullscreen;
       await exitFullscreenIfNeeded();
       await WinHotkeys().taskbarShow(playing: isPlaying);
+      try {
+        await windowManager.minimize();
+      } catch (_) {}
     } else if (!kIsWeb &&
         _settings.listenModeHideWindow &&
         !await _resolveIsTv() &&

@@ -1,7 +1,7 @@
 name: omtv
 description: OMTV 欧米电视：央视频内置频道/EPG 的跨平台电视播放器。
 publish_to: 'none'
-version: 1.0.22+23
+version: 1.0.23+24
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

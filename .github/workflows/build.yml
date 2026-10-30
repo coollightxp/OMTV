@@ -123,6 +123,9 @@ jobs:
           import android.content.pm.ServiceInfo
           import android.graphics.Bitmap
           import android.graphics.BitmapFactory
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.RectF
           import android.graphics.drawable.Icon
           import android.media.MediaMetadata
           import android.media.session.MediaSession
@@ -214,6 +217,27 @@ jobs:
                   }
               }
 
+              /**
+               * 台标多为透明底 PNG，直接贴到白色卡片上会看不清：
+               * 给它垫一层深色圆角衬底，并在右侧留一段透明空白，
+               * 让台标离卡片右边缘有点距离（观感更舒服）。
+               */
+              private fun buildArt(src: Bitmap): Bitmap {
+                  val h = 128
+                  val w = 104          // 衬底宽度
+                  val gap = 22         // 右侧留白
+                  val out = Bitmap.createBitmap(w + gap, h, Bitmap.Config.ARGB_8888)
+                  val c = Canvas(out)
+                  val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1F2633.toInt() }
+                  c.drawRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), 18f, 18f, bg)
+                  val pad = 12f
+                  c.drawBitmap(
+                      src, null, RectF(pad, pad, w - pad, h - pad),
+                      Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                  )
+                  return out
+              }
+
               private val actionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
                       when (intent?.action) {
@@ -287,7 +311,9 @@ jobs:
                       val key = it.getStringExtra("logoKey") ?: ""
                       if (key != artKey) {
                           artKey = key
-                          artBmp = decodeLogo(it.getStringExtra("logo") ?: "")
+                          artBmp = decodeLogo(it.getStringExtra("logo") ?: "")?.let { raw ->
+                              buildArt(raw)
+                          }
                       }
                   }
                   val n = buildNotification()
