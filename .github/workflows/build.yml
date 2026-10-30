@@ -218,21 +218,27 @@ jobs:
               }
 
               /**
-               * 台标多为透明底 PNG，直接贴到白色卡片上会看不清：
-               * 给它垫一层深色圆角衬底，并在右侧留一段透明空白，
-               * 让台标离卡片右边缘有点距离（观感更舒服）。
+               * 台标多为透明底 PNG，直接贴到白色卡片上会看不清：垫一层
+               * 深色圆角衬底。台标必须**按原始比例等比缩放**（fitCenter），
+               * 不能被目标矩形强行拉伸，否则宽台标会被压扁、看起来像被挤没了。
                */
               private fun buildArt(src: Bitmap): Bitmap {
-                  val h = 128
-                  val w = 104          // 衬底宽度
-                  val gap = 22         // 右侧留白
-                  val out = Bitmap.createBitmap(w + gap, h, Bitmap.Config.ARGB_8888)
+                  val size = 128
+                  val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
                   val c = Canvas(out)
                   val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1F2633.toInt() }
-                  c.drawRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), 18f, 18f, bg)
-                  val pad = 12f
+                  c.drawRoundRect(
+                      RectF(0f, 0f, size.toFloat(), size.toFloat()), 18f, 18f, bg
+                  )
+                  val pad = 14f
+                  val avail = size - pad * 2
+                  val scale = minOf(avail / src.width, avail / src.height)
+                  val dw = src.width * scale
+                  val dh = src.height * scale
+                  val left = (size - dw) / 2f
+                  val top = (size - dh) / 2f
                   c.drawBitmap(
-                      src, null, RectF(pad, pad, w - pad, h - pad),
+                      src, null, RectF(left, top, left + dw, top + dh),
                       Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
                   )
                   return out
