@@ -1,10 +1,11 @@
 name: Build OMTV
 
 on:
-  push:
-    branches: [main, master]
+  # 只在发布 Release 时构建出包：普通 push 不再自动触发，
+  # 避免每次提交/发版重复构建（私有仓库下 Actions 按分钟计费，Windows 双倍）
   release:
     types: [published]
+  # 保留手动触发按钮（不会自动跑，仅用于排障重跑）
   workflow_dispatch:
 
 permissions:
