@@ -1883,10 +1883,18 @@ class PlayerController extends ChangeNotifier {
       case 'next':
         await nextChannel();
         break;
+      case 'close':
+        // 通知栏 ❌ / 系统媒体停止：退出听电视并暂停，App 留在后台
+        await _closeListenAndPause();
+        break;
       case 'stop':
-      case 'restore':
-        // 关闭音频模式 / 点卡片回 App：原生已把窗口拉回前台
+        // Windows 托盘菜单「退出听电视」：恢复窗口回到画面
         await exitListenMode();
+        break;
+      case 'restore':
+        // 点卡片回 App：安卓保持听电视（停在信息卡片页，音频继续）；
+        // Windows 托盘恢复窗口则退出听电视回到画面
+        if (isDesktop) await exitListenMode();
         break;
     }
     // 仍在听电视则刷新卡片（切台/暂停后节目信息变了）
@@ -1987,6 +1995,22 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> toggleListenMode() =>
       _listenMode ? exitListenMode() : enterListenMode();
+
+  /// 通知栏 ❌/系统媒体停止：退出听电视并暂停播放。
+  /// 与「点卡片回界面（restore）」不同：不拉起 App、不继续出声——
+  /// 音乐 App 通知 ❌ 的通用语义（彻底关掉后台收听）。
+  Future<void> _closeListenAndPause() async {
+    if (!_listenMode) return;
+    // 先停声：暂停内核/页面播放器
+    if (isPlaying) await togglePlayPause();
+    // 退出听电视（恢复画面档、收掉通知卡片），不拉起 App
+    await exitListenMode();
+    // 网页频道切回画面档可能让站点播放器自动起播：补一刀暂停兜底
+    if (isPlaying) {
+      await Future.delayed(const Duration(milliseconds: 800));
+      if (isPlaying) await togglePlayPause();
+    }
+  }
 
   /// 上一次下发给通知栏卡片的内容签名（避免每 500ms 重复调用原生）
   String _listenCardSig = '';

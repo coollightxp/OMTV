@@ -125,8 +125,10 @@ jobs:
           import android.graphics.Bitmap
           import android.graphics.BitmapFactory
           import android.graphics.Canvas
+          import android.graphics.LinearGradient
           import android.graphics.Paint
           import android.graphics.RectF
+          import android.graphics.Shader
           import android.graphics.drawable.Icon
           import android.media.MediaMetadata
           import android.media.session.MediaSession
@@ -138,7 +140,8 @@ jobs:
           /**
            * 听电视：前台服务 + 媒体通知卡片
            * - 卡片内容：频道名 + 正在播节目 + 播放状态
-           * - 动作按钮：上一台 / 播放暂停 / 下一台 / 关闭（回 App 并切回画面）
+           * - 动作按钮：上一台 / 播放暂停 / 下一台 / ❌退出听电视（停播收卡片，不回 App）
+           * - 点卡片主体：回 App 停在听电视信息卡片（音频继续，不退出听电视）
            * - 按钮命令通过广播回传 MainActivity，再由 MethodChannel 转给 Flutter
            */
           class AudioPlaybackService : Service() {
@@ -150,6 +153,7 @@ jobs:
                   const val ACT_PLAY_PAUSE = "com.coollightxp.omtv.ACTION_PLAY_PAUSE"
                   const val ACT_PREV = "com.coollightxp.omtv.ACTION_PREV"
                   const val ACT_NEXT = "com.coollightxp.omtv.ACTION_NEXT"
+                  const val ACT_CLOSE = "com.coollightxp.omtv.ACTION_CLOSE"
 
                   /** 服务 → Activity 的指令广播 */
                   const val ACTION_CMD = "com.coollightxp.omtv.AUDIO_CMD"
@@ -220,18 +224,28 @@ jobs:
 
               /**
                * 台标多为透明底 PNG，直接贴到白色卡片上会看不清：垫一层
-               * 深色圆角衬底。台标必须**按原始比例等比缩放**（fitCenter），
+               * 深色渐变圆角衬底（锁屏全屏封面也用它；384 兼顾清晰度与
+               * Binder 1MB 事务上限——512 ARGB 恰好顶到上限会抛异常）。
+               * 台标必须**按原始比例等比缩放**（fitCenter），
                * 不能被目标矩形强行拉伸，否则宽台标会被压扁、看起来像被挤没了。
                */
               private fun buildArt(src: Bitmap): Bitmap {
-                  val size = 128
+                  val size = 384
                   val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
                   val c = Canvas(out)
-                  val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1F2633.toInt() }
+                  // 深蓝灰竖向渐变：比纯色有质感，锁屏全屏铺底不发闷
+                  val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      shader = LinearGradient(
+                          0f, 0f, 0f, size.toFloat(),
+                          0xFF2A3448.toInt(), 0xFF10151F.toInt(),
+                          Shader.TileMode.CLAMP
+                      )
+                  }
                   c.drawRoundRect(
-                      RectF(0f, 0f, size.toFloat(), size.toFloat()), 18f, 18f, bg
+                      RectF(0f, 0f, size.toFloat(), size.toFloat()), 42f, 42f, bg
                   )
-                  val pad = 14f
+                  // 台标约占画面 62%，四周留白有呼吸感
+                  val pad = size * 0.19f
                   val avail = size - pad * 2
                   val scale = minOf(avail / src.width, avail / src.height)
                   val dw = src.width * scale
@@ -251,6 +265,11 @@ jobs:
                           ACT_PLAY_PAUSE -> emit("playpause")
                           ACT_PREV -> emit("prev")
                           ACT_NEXT -> emit("next")
+                          // ❌退出听电视：通知 Flutter 停播，同时立刻收掉卡片
+                          ACT_CLOSE -> {
+                              emit("close")
+                              stopSelf()
+                          }
                       }
                   }
               }
@@ -284,7 +303,8 @@ jobs:
                           override fun onSkipToNext() = emit("next")
                           override fun onSkipToPrevious() = emit("prev")
                           override fun onStop() {
-                              emit("stop")
+                              // 与通知 ❌ 同语义：停播收卡片，不切回画面继续出声
+                              emit("close")
                               stopSelf()
                           }
                       })
@@ -302,6 +322,7 @@ jobs:
                       addAction(ACT_PLAY_PAUSE)
                       addAction(ACT_PREV)
                       addAction(ACT_NEXT)
+                      addAction(ACT_CLOSE)
                   }
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       registerReceiver(actionReceiver, f, Context.RECEIVER_NOT_EXPORTED)
@@ -428,13 +449,20 @@ jobs:
                       .setContentText(
                           if (curProgram.isNotEmpty()) "正在播 $curProgram" else "音频播放中"
                       )
-                      .setContentIntent(openActivityPi(1, true))
+                      // 点卡片主体回 App：保持听电视状态，停在信息卡片页
+                      .setContentIntent(openActivityPi(1, false))
                       .setVisibility(Notification.VISIBILITY_PUBLIC)
                       // 传输控制类：锁屏/媒体控制区才把它当播放器卡片处理
                       .setCategory(Notification.CATEGORY_TRANSPORT)
                       .setShowWhen(false)
                       .setOngoing(true)
                       .setOnlyAlertOnce(true)
+                  // 卡片底色取台标调色板（Android 8+；低版本用 setColor 兜底），
+                  // 锁屏/通知栏里不再是突兀的纯白卡片
+                  b.setColor(0xFF2A3448.toInt())
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      b.setColorized(true)
+                  }
                   // 右侧大图：当前电视台台标（无台标时退回应用图标）
                   (artBmp ?: appIcon())?.let { b.setLargeIcon(it) }
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -464,10 +492,11 @@ jobs:
                           broadcastPi(ACT_NEXT, 4)
                       )
                   )
+                  // ❌退出听电视：广播走服务（不拉起 App），停播 + 收卡片
                   b.addAction(
                       actionOf(
-                          android.R.drawable.ic_menu_close_clear_cancel, "关闭",
-                          openActivityPi(5, true)
+                          android.R.drawable.ic_menu_close_clear_cancel, "退出听电视",
+                          broadcastPi(ACT_CLOSE, 5)
                       )
                   )
                   return b.build()
