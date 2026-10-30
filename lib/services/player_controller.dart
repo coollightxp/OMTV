@@ -2660,6 +2660,20 @@ class PlayerController extends ChangeNotifier {
     CastLog.write(
         'cast RECOVERY triggered savedPos=${savedPos.inSeconds}s isLive=$isLive fallback=${resumePosMs != null}');
     await _playCurrentSource();
+    // 代际守卫：上面的 await 期间用户可能已断开投屏、恢复了原频道，
+    // 甚至投了新片。若续体继续执行，会把【旧片卡死时记下的进度】
+    // seek 到新播放器上（还绕过了节流），新片被 seek 到错误位置
+    // 甚至超出片长——表现为换片后起播异常/有声无画/像在后台瞎播。
+    // 用控制器实例身份判定（比代际号更准：init 超时原地重拉会让
+    // 代际号再 +1，但仍是本次重建自己的控制器）
+    final mine = _videoController;
+    if (mine == null || !_isCasting || _currentChannel != ch) {
+      CastLog.write('cast RECOVERY aborted: superseded by new play');
+      return;
+    }
+    bool stale() => !_isCasting ||
+        _currentChannel != ch ||
+        !identical(_videoController, mine);
     if (!isLive && savedPos > const Duration(seconds: 2)) {
       // 等内核真正开始播放再 seek：
       // 仅 isInitialized && !isBuffering 不够——init 完成后有极短的
@@ -2667,9 +2681,12 @@ class PlayerController extends ChangeNotifier {
       // 要求位置已实际推进（>0.3s）且在播放中，最多等 10 秒。
       var ready = false;
       for (var i = 0; i < 20; i++) {
-        final nv = _videoController?.value;
-        if (nv != null &&
-            nv.isInitialized &&
+        if (stale()) {
+          CastLog.write('cast RECOVERY aborted during ready-wait');
+          return;
+        }
+        final nv = mine.value;
+        if (nv.isInitialized &&
             !nv.isBuffering &&
             nv.isPlaying &&
             nv.position.inMilliseconds > 300) {
@@ -2679,12 +2696,13 @@ class PlayerController extends ChangeNotifier {
         await Future.delayed(const Duration(milliseconds: 500));
       }
       if (ready) {
+        if (stale()) return; // seek 前最后确认，等待期间被新播放取代则放弃
         CastLog.write(
             'cast RECOVERY resume seek ${savedPos.inSeconds}s');
         try {
-          await _videoController?.seekTo(savedPos);
+          await mine.seekTo(savedPos);
           CastLog.write(
-              'cast RECOVERY seek done pos=${_videoController?.value.position.inSeconds}s');
+              'cast RECOVERY seek done pos=${mine.value.position.inSeconds}s');
         } catch (e) {
           CastLog.write('cast RECOVERY seek FAILED: $e');
         }
@@ -2696,6 +2714,7 @@ class PlayerController extends ChangeNotifier {
     // 重置观察计时，给新流一个干净的开始（重建计数 [_castReinitCount] 不动，
     // 由位置推进确认恢复后清零）。否则 _watchAdvanceAt/_bufferingSince
     // 仍是重建前的旧时间，新流正常缓冲会被立即误判
+    if (stale()) return; // 已被新播放取代：新播放自己有干净的计时，不覆盖
     _watchPosMs = -1;
     _watchAdvanceAt = null;
     _stallNudged = false;
