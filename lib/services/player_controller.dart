@@ -1447,12 +1447,22 @@ class PlayerController extends ChangeNotifier {
     // 投屏点播（非 HLS）给独立的 15 秒缓冲：旧值 90 秒意味着 seek 后
     // 要攒够 90 秒的媒体数据才恢复播放——视频号等 CDN 远距 seek 后限速
     // 下载，实测 90 秒都填不满（看门狗超时重建→重新缓冲→永远播不出来）。
-    // 15 秒兼顾抗抖动与恢复速度（mpv/Macast 同样是小缓冲即开播）；
-    // 直播/HLS 投屏仍用用户设置，避免拉长直播延迟。
+    // 15 秒兼顾抗抖动与恢复速度（mpv/Macast 同样是小缓冲即开播）。
+    // 投屏 HLS 直播在用户设置基础上封顶 10 秒：直播分片实时生成，
+    // 播放列表滑动窗口只有十来秒可下，目标缓冲比窗口还大物理上
+    // 永远填不满，接收端迟迟不进播放态，发送端 SDK 等不到就直接
+    // 断开投屏（实测缓冲设 20 秒后抖音投屏必掉）
     final rawUrl = channel.streamUrls[_sourceIndex].toLowerCase();
     final isHls = rawUrl.contains('.m3u8') || rawUrl.contains('.m3u');
-    registerFvp(
-        bufferSeconds: _isCasting && !isHls ? 15 : _settings.bufferSeconds);
+    var bufSecs = _settings.bufferSeconds;
+    if (_isCasting) {
+      if (isHls) {
+        if (bufSecs > 10) bufSecs = 10;
+      } else {
+        bufSecs = 15;
+      }
+    }
+    registerFvp(bufferSeconds: bufSecs);
 
     await _disposeVideoController();
 
