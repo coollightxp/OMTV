@@ -210,6 +210,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
   }
 
+  @override
+  void onWindowRestore() {
+    // 听电视把窗口最小化/隐藏后，用户若从系统侧恢复窗口
+    // （点任务栏按钮、Alt+Tab 切回），原生不会发 restore 命令，
+    // _listenMode 会卡在 true：动作键（方向/OK/返回/菜单/遥控器）
+    // 全被「听电视卡片独占按键」分支吞掉，键盘几乎全灭。
+    // 窗口既然回到眼前，统一退出听电视回到正常播放。
+    // （托盘双击/卡片按钮走命令通道，exitListenMode 幂等，不冲突）
+    final c = _controllerRef;
+    if (c != null && c.listenMode) c.exitListenMode();
+  }
+
   /// 释放网页引擎：释放 WebView2 环境及其宿主子进程（避免退出后
   /// 残留进程继续解码占资源，Win10 家庭版报"已停止工作"）
   Future<void> _releaseWebEngine() async {
