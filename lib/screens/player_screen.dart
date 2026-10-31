@@ -292,10 +292,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   /// 数字键选台：追加到缓存，1.5 秒后跳转
   void _onNumberKey(int n) {
+    WebDiag.log('key', 'digit: $n');
     // 设置面板打开时不拦截数字键（避免影响输入框）
-    if (_settingsOpen) return;
+    if (_settingsOpen) {
+      WebDiag.log('key', 'digit blocked: settingsOpen');
+      return;
+    }
     // 锁定状态：屏蔽所有误触操作（数字键也走原生钩子，需在此兜住）
-    if (context.read<PlayerController>().locked) return;
+    if (context.read<PlayerController>().locked) {
+      WebDiag.log('key', 'digit blocked: locked');
+      return;
+    }
     setState(() {
       _numBuffer += n.toString();
       _osdVisible = true;
@@ -2540,10 +2547,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     } else {
       _nativeHeld.remove(action);
     }
+    // 按键诊断：定位"键盘失灵"类问题时确认消息是否到达、被哪个守卫拦下
+    if (isDown) WebDiag.log('key', 'native down: $action');
     // 锁定状态：原生钩子路径（网页前台时 HardwareKeyboard 收不到键）
     // 同样屏蔽全部操作，仅返回键或 L 键解锁
     final ctl = context.read<PlayerController>();
     if (ctl.locked) {
+      if (isDown) WebDiag.log('key', 'blocked: locked');
       if (isDown && (action == 'esc' || action == 'back' || action == 'l')) {
         ctl.unlock();
       }
@@ -2552,6 +2562,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 设置面板打开：仅返回键关面板，其余（字母键/空格等）忽略，
     // 此时钩子捕获本就由 setCapture(false) 关闭，这里是双保险
     if (_settingsOpen) {
+      if (isDown) WebDiag.log('key', 'blocked: settingsOpen');
       if (isDown && (action == 'esc' || action == 'back')) {
         _handleBackPressed();
       }
@@ -2560,6 +2571,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     // 对话框（二维码/退出确认等）打开：统一收口；抬起边沿复位配对状态，
     // 绝不能落到 _handleBackPressed（否则会退全屏/缩小窗口）
     if (_modalRouteOpen) {
+      if (isDown) WebDiag.log('key', 'blocked: modalRouteOpen');
       if (!isDown) {
         if (action == 'ok') {
           _okHeld = false;
@@ -2624,6 +2636,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
     }
     // 听电视卡片独占按键（网页/窗口持有焦点时走原生钩子这条路径）
     if (ctl.listenMode) {
+      if (isDown) WebDiag.log('key', 'blocked: listenMode');
       _handleListenCardKey(_listenActionOfNative(action), isDown);
       return;
     }

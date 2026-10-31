@@ -29,14 +29,25 @@ class WinHotkeys {
   static const BasicMessageChannel<String> _channel =
       BasicMessageChannel<String>('omtv/win_hotkeys', StringCodec());
 
-  void Function(int digit)? _onDigit;
+  /// 工厂构造 + 单例：通道是静态共享的，回调与安装标记也必须是静态的。
+  /// 历史上这里都是实例字段，PlayerScreen 与 PlayerController 各 new 一个
+  /// 实例分别注册数字键/动作键/托盘命令——setMessageHandler 挂在共享通道
+  /// 上，后注册的实例整体覆盖先注册的（哪组回调存活取决于异步注册时序，
+  /// 表现为"数字键好使、方向键/OK/返回全灭"这类随机组合）；PlayerScreen
+  /// dispose 时还会把共享通道处理器置空，拖死托盘命令。改静态后任何
+  /// 实例、任何注册/销毁顺序都不再有互相覆盖问题。
+  factory WinHotkeys() => _instance;
+  WinHotkeys._();
+  static final WinHotkeys _instance = WinHotkeys._();
+
+  static void Function(int digit)? _onDigit;
 
   /// 动作键回调；isDown=true 为按下、false 为抬起
-  void Function(String action, bool isDown)? _onAction;
+  static void Function(String action, bool isDown)? _onAction;
 
   /// 托盘/任务栏控制栏命令回调
-  void Function(String cmd)? _onShellCmd;
-  bool _handlerInstalled = false;
+  static void Function(String cmd)? _onShellCmd;
+  static bool _handlerInstalled = false;
 
   /// 注册数字键回调（参数 0-9）。传 null 注销。
   void setDigitHandler(void Function(int digit)? onDigit) {
