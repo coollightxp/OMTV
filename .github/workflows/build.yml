@@ -1109,6 +1109,8 @@ jobs:
             'FlutterDesktopMessengerRef g_om_messenger = nullptr;',
             '// 听电视托盘/任务栏控制栏消息处理（定义在下方 shell 注入块）',
             'void OMShellHandleMessage(const uint8_t* m, size_t n);',
+            '// 退出清理：卸载钩子、清托盘/任务栏、恢复光标（原生析构链和 exit:clean 都调它）',
+            'void OMExitCleanup();
             '// TRUE = intercept hotkeys; Dart sets FALSE while settings panel open.',
             'volatile BOOL g_om_capture = TRUE;',
             '// TRUE = hide cursor after 3s idle; Dart enables while web foreground.',
@@ -1141,7 +1143,7 @@ jobs:
             '                         void* user_data) {',
             '  if (message->message != nullptr && message->message_size >= 1) {',
             '    const uint8_t* m = message->message;',
-            '    if (m[0] == 0x74) {  // "tray:" / "tb:" 听电视托盘/任务栏控制栏',
+            '    if (m[0] == 0x74 || m[0] == 0x65) {  // "tray:"/"tb:"/"exit:" 走 shell 命令',
             '      OMShellHandleMessage(m, static_cast<size_t>(message->message_size));',
             '    } else if (m[0] == 0x43) {  // "C1"/"C0": cursor-hide enable/disable',
             '      g_om_cursor_hide =',
@@ -1629,19 +1631,23 @@ jobs:
             '    return;',
             '  }',
             '  if (s == "exit:clean") {',
-            '    // 卸载低级键盘/鼠标钩子（进程退出前不卸载也会被系统清掉，',
-            '    // 但显式卸载让系统光标/键盘计数回到正常值）',
-            '    if (g_om_kb_hook) { ::UnhookWindowsHookEx(g_om_kb_hook); g_om_kb_hook = nullptr; }',
-            '    if (g_om_mouse_hook) { ::UnhookWindowsHookEx(g_om_mouse_hook); g_om_mouse_hook = nullptr; }',
-            '    // 清托盘图标、任务栏缩略图控制栏',
-            '    OMTrayRemove();',
-            '    OMTaskbarHide();',
-            '    // 恢复光标显示计数（避免系统光标"消失"）',
-            '    g_om_cursor_hide = FALSE;',
-            '    OMShowCursorAgain();',
+            '    // 先清场：卸钩子/清托盘/恢复光标（幂等，原生析构链也会调）',
+            '    OMExitCleanup();',
             '    // 直接杀进程，跳过会崩溃的析构链',
             '    ::TerminateProcess(::GetCurrentProcess(), 0);',
             '  }',
+            '}',
+            '// 退出清理：KillTimer + 卸键盘/鼠标钩子 + 清托盘/任务栏 + 恢复光标。',
+            '// 三处调用：exit:clean 命令主动 TerminateProcess 前、',
+            '// Win32Window::OnDestroy 原生析构链、FlutterWindow 析构函数。幂等。',
+            'void OMExitCleanup() {',
+            '  ::KillTimer(nullptr, 0x4F43);',
+            '  if (g_om_kb_hook) { ::UnhookWindowsHookEx(g_om_kb_hook); g_om_kb_hook = nullptr; }',
+            '  if (g_om_mouse_hook) { ::UnhookWindowsHookEx(g_om_mouse_hook); g_om_mouse_hook = nullptr; }',
+            '  OMTrayRemove();',
+            '  OMTaskbarHide();',
+            '  g_om_cursor_hide = FALSE;',
+            '  OMShowCursorAgain();',
             '}',
             '}  // namespace',
             '// ===== end injected code ====='
@@ -1667,8 +1673,23 @@ jobs:
             '  OMShellAttach(this->GetHandle());'
           ) -join "`r`n"
           $wt = $wt.Replace($wIncAnchor, $wInc).Replace($wRegAnchor, $wReg)
+          # 退出时务必恢复原生状态：卸载键盘/鼠标钩子 + 清托盘/任务栏 + 恢复光标。
+          # 双保险：Dart 侧 exit:clean 主动 TerminateProcess 是一条路；
+          # 原生析构链（Win32Window::OnDestroy + FlutterWindow 析构）也必须调 OMExitCleanup，
+          # 否则走正常析构路径（不 kill）会残留隐藏光标/钩子/托盘图标。
+          if (-not $wt.Contains('  Win32Window::OnDestroy();')) {
+            throw 'flutter_window.cpp OnDestroy anchor not found'
+          }
+          $wt = $wt.Replace('  Win32Window::OnDestroy();',
+            "  OMExitCleanup();`r`n  Win32Window::OnDestroy();")
+          $dtorPat = 'FlutterWindow::~FlutterWindow\(\)\s*(=\s*default;|\{\s*\})'
+          if (-not [regex]::IsMatch($wt, $dtorPat)) {
+            throw 'flutter_window.cpp destructor anchor not found'
+          }
+          $wt = [regex]::Replace($wt, $dtorPat,
+            "FlutterWindow::~FlutterWindow() {`r`n  OMExitCleanup();`r`n}")
           [System.IO.File]::WriteAllText($fw, $wt, (New-Object System.Text.UTF8Encoding($false)))
-          'flutter_window.cpp: injected digit hotkey WH_KEYBOARD_LL hook'
+          'flutter_window.cpp: injected digit hotkey WH_KEYBOARD_LL hook + exit cleanup in native dtor chain'
 
           # flutter_inappwebview_windows 仍使用 /await + <experimental/coroutine>，
           # VS2026 (MSVC 14.51) 已将其升为硬错误；在顶层 CMakeLists 的插件
