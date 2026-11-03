@@ -1990,6 +1990,9 @@ class PlayerController extends ChangeNotifier {
         } catch (_) {}
       }
     }
+    // 恢复原生光标隐藏：进入听电视时关掉了（setCursorHide(false)），
+    // 网页频道回到正常播放后要重新打开，否则鼠标不再延时隐藏
+    if (webPageActive) WinHotkeys().setCursorHide(true);
     notifyListeners();
   }
 

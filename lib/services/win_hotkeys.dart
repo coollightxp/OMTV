@@ -152,4 +152,8 @@ class WinHotkeys {
 
   /// 移除任务栏控制栏
   Future<void> taskbarHide() => _send('tb:del');
+
+  /// 发送原始命令字符串给 runner（非 Windows 或旧 runner 静默忽略）。
+  /// 用于退出时发 exit:clean 等非托盘/任务栏的原生指令
+  Future<void> sendRaw(String msg) => _send(msg);
 }

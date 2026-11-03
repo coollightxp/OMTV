@@ -123,7 +123,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
 
   // 退出确认面板展示的应用版本（与 pubspec.yaml version 前半保持一致）。
   // OMTV 是独立项目，版本从 1.0.0 重新起算，不续接 omplayer 的 1.0.167
-  static const String _appVersion = '1.0.25';
+  static const String _appVersion = '1.0.26';
 
   // 退出确认对话框的遥控器友好句柄：左右键移动焦点，OK 确认当前按钮
   // 0=返回, 1=退出, 2=设置, 3=锁定, 4=听电视, 5=关机（按需出现）
@@ -199,6 +199,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WindowListener {
         c.exitWebPage();
         // 等一帧让 WebView 平台视图完成原生销毁，规避退出崩溃
         await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+      // 先发 exit:clean 给 runner：卸载键盘/鼠标钩子、清托盘/任务栏、
+      // 恢复系统光标计数，然后 TerminateProcess 直接杀进程，
+      // 跳过会崩溃的析构链（WebView2 宿主子进程析构偶发抛 0xc000000d）。
+      // 旧 runner 不认识这条命令会忽略，继续走下面的正常 destroy 流程
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.windows)) {
+        try { await _winHotkeys.sendRaw('exit:clean'); } catch (_) {}
       }
       await _releaseWebEngine();
       await windowManager.setPreventClose(false);

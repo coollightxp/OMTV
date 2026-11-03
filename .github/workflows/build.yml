@@ -125,10 +125,8 @@ jobs:
           import android.graphics.Bitmap
           import android.graphics.BitmapFactory
           import android.graphics.Canvas
-          import android.graphics.LinearGradient
           import android.graphics.Paint
           import android.graphics.RectF
-          import android.graphics.Shader
           import android.graphics.drawable.Icon
           import android.media.MediaMetadata
           import android.media.session.MediaSession
@@ -224,8 +222,10 @@ jobs:
 
               /**
                * 台标多为透明底 PNG，直接贴到白色卡片上会看不清：垫一层
-               * 深色渐变圆角衬底（锁屏全屏封面也用它；384 兼顾清晰度与
-               * Binder 1MB 事务上限——512 ARGB 恰好顶到上限会抛异常）。
+               * 深蓝圆角衬底。颜色与通知卡片同色（setColor 0xFF2A3448），
+               * 图标区与卡片融为一体，不再像单独一块深色补丁；
+               * 锁屏全屏封面也用它（384 兼顾清晰度与 Binder 1MB 事务上限——
+               * 512 ARGB 恰好顶到上限会抛异常）。
                * 台标必须**按原始比例等比缩放**（fitCenter），
                * 不能被目标矩形强行拉伸，否则宽台标会被压扁、看起来像被挤没了。
                */
@@ -233,19 +233,15 @@ jobs:
                   val size = 384
                   val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
                   val c = Canvas(out)
-                  // 深蓝灰竖向渐变：比纯色有质感，锁屏全屏铺底不发闷
+                  // 纯色深蓝（与通知卡片同色），透明台标直接垫在蓝色上
                   val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                      shader = LinearGradient(
-                          0f, 0f, 0f, size.toFloat(),
-                          0xFF2A3448.toInt(), 0xFF10151F.toInt(),
-                          Shader.TileMode.CLAMP
-                      )
+                      color = 0xFF2A3448.toInt()
                   }
                   c.drawRoundRect(
                       RectF(0f, 0f, size.toFloat(), size.toFloat()), 42f, 42f, bg
                   )
-                  // 台标约占画面 62%，四周留白有呼吸感
-                  val pad = size * 0.19f
+                  // 台标放大到约 84%：62% 在通知大图/锁屏封面上太小看不清
+                  val pad = size * 0.08f
                   val avail = size - pad * 2
                   val scale = minOf(avail / src.width, avail / src.height)
                   val dw = src.width * scale
@@ -1123,6 +1119,9 @@ jobs:
             'volatile BOOL g_om_web_forward = FALSE;',
             'DWORD g_om_last_mouse_tick = 0;',
             'bool g_om_mouse_hidden = false;',
+            '// 键盘/鼠标低级钩子句柄（exit:clean 时卸载）',
+            'HHOOK g_om_kb_hook = nullptr;',
+            'HHOOK g_om_mouse_hook = nullptr;',
             'void OMShowCursorAgain() {',
             '  if (g_om_mouse_hidden) {',
             '    g_om_mouse_hidden = false;',
@@ -1596,6 +1595,8 @@ jobs:
             '//   tb:add:0|1       任务栏缩略图控制栏（1=正在播放）',
             '//   tb:state:0|1     刷新控制栏播放/暂停图标',
             '//   tb:del           隐藏控制栏',
+            '//   exit:clean       清场（卸钩子/清托盘/恢复光标）后 TerminateProcess，',
+            '//                     跳过会崩溃的析构链；旧 runner 不认识则忽略，继续原流程',
             'void OMShellHandleMessage(const uint8_t* m, size_t n) {',
             '  const std::string s(reinterpret_cast<const char*>(m), n);',
             '  if (s == "tray:del") {',
@@ -1625,6 +1626,21 @@ jobs:
             '  }',
             '  if (s == "tb:del") {',
             '    OMTaskbarHide();',
+            '    return;',
+            '  }',
+            '  if (s == "exit:clean") {',
+            '    // 卸载低级键盘/鼠标钩子（进程退出前不卸载也会被系统清掉，',
+            '    // 但显式卸载让系统光标/键盘计数回到正常值）',
+            '    if (g_om_kb_hook) { ::UnhookWindowsHookEx(g_om_kb_hook); g_om_kb_hook = nullptr; }',
+            '    if (g_om_mouse_hook) { ::UnhookWindowsHookEx(g_om_mouse_hook); g_om_mouse_hook = nullptr; }',
+            '    // 清托盘图标、任务栏缩略图控制栏',
+            '    OMTrayRemove();',
+            '    OMTaskbarHide();',
+            '    // 恢复光标显示计数（避免系统光标"消失"）',
+            '    g_om_cursor_hide = FALSE;',
+            '    OMShowCursorAgain();',
+            '    // 直接杀进程，跳过会崩溃的析构链',
+            '    ::TerminateProcess(::GetCurrentProcess(), 0);',
             '  }',
             '}',
             '}  // namespace',
@@ -1642,10 +1658,10 @@ jobs:
             '      om_registrar);',
             '  ::FlutterDesktopMessengerSetCallback(g_om_messenger,',
             '      "omtv/win_hotkeys", &OMMessengerCallback, nullptr);',
-            '  ::SetWindowsHookExW(WH_KEYBOARD_LL, &OMLowLevelKeyboardProc,',
-            '                      ::GetModuleHandleW(nullptr), 0);',
-            '  ::SetWindowsHookExW(WH_MOUSE_LL, &OMLowLevelMouseProc,',
-            '                      ::GetModuleHandleW(nullptr), 0);',
+            '  g_om_kb_hook = ::SetWindowsHookExW(WH_KEYBOARD_LL, &OMLowLevelKeyboardProc,',
+            '                                     ::GetModuleHandleW(nullptr), 0);',
+            '  g_om_mouse_hook = ::SetWindowsHookExW(WH_MOUSE_LL, &OMLowLevelMouseProc,',
+            '                                       ::GetModuleHandleW(nullptr), 0);',
             '  ::SetTimer(nullptr, 0x4F43, 500, OMCursorTimerProc);',
             '  // OMTV: 子类化窗口，接管听电视托盘图标与任务栏缩略图控制栏消息',
             '  OMShellAttach(this->GetHandle());'
