@@ -1110,7 +1110,7 @@ jobs:
             '// 听电视托盘/任务栏控制栏消息处理（定义在下方 shell 注入块）',
             'void OMShellHandleMessage(const uint8_t* m, size_t n);',
             '// 退出清理：卸载钩子、清托盘/任务栏、恢复光标（原生析构链和 exit:clean 都调它）',
-            'void OMExitCleanup();
+            'void OMExitCleanup();',
             '// TRUE = intercept hotkeys; Dart sets FALSE while settings panel open.',
             'volatile BOOL g_om_capture = TRUE;',
             '// TRUE = hide cursor after 3s idle; Dart enables while web foreground.',
