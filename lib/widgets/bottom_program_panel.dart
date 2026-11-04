@@ -8,19 +8,14 @@ import 'scaled_panel.dart';
 
 /// 底部信息/控制面板
 /// 布局：台标 | 当前节目(大字)+时段/频道/分辨率 | 控制按钮
-/// 按钮顺序固定：播放/暂停、重载、全屏/小窗（电视端不显示）、静音/恢复、
-/// 旋转、截图/录像(桌面)、分辨率
+/// 按钮：播放/暂停、重载(非投屏时)、断开投屏(投屏时)、全屏/小窗（电视端不显示）、
+/// 静音/恢复、旋转(仅投屏时)、截图/录像(桌面)、分辨率(非投屏时)
 /// （听电视/锁定/设置与安卓一致，统一放在返回键弹出的退出面板里）
 ///
 /// 遥控器导航（TV 盒子无鼠标）：面板可见时，←/→ 在可用按钮间移动高亮，
 /// OK 激活当前按钮，返回键由播放页负责关闭面板。
 class BottomProgramPanel extends StatefulWidget {
   final bool isVisible;
-
-  /// 跳转类（频道/EPG/设置）由播放页关闭面板
-  final VoidCallback onOpenChannels;
-  final VoidCallback onOpenEpg;
-  final VoidCallback onOpenSettings;
 
   /// 全屏 ↔ 小窗（桌面全屏切换 / 移动端小窗播放）
   final VoidCallback onToggleFullMini;
@@ -40,9 +35,6 @@ class BottomProgramPanel extends StatefulWidget {
   const BottomProgramPanel({
     super.key,
     required this.isVisible,
-    required this.onOpenChannels,
-    required this.onOpenEpg,
-    required this.onOpenSettings,
     required this.onToggleFullMini,
     required this.onReload,
     required this.onScreenshot,
@@ -308,7 +300,6 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           runSpacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            if (current != null) _metaText(_range(current), Colors.amber),
             if (hasChannel) _metaText(info.channelName, Colors.white70),
             if (hasChannel) _badge(_resolutionLabel(c)),
             if (c.listenMode) _badge('听电视中'),
@@ -369,13 +360,16 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         c.isPlaying ? '暂停' : '播放',
         hasChannel ? c.togglePlayPause : null,
       ),
-      // 卡死/黑屏时手动重新载入当前电视台（网页频道刷新页面、流频道重播）
-      _KbAction(
-        'reload',
-        Icons.refresh,
-        '重载当前频道',
-        hasChannel ? widget.onReload : null,
-      ),
+      // 卡死/黑屏时手动重新载入当前电视台（网页频道刷新页面、流频道重播）。
+      // 投屏时隐藏：重载的是直播频道，对投屏流没有意义
+      // （投屏卡顿由投屏看门狗自动处理，断开按钮也在面板上）
+      if (!c.isCasting)
+        _KbAction(
+          'reload',
+          Icons.refresh,
+          '重载当前频道',
+          hasChannel ? widget.onReload : null,
+        ),
       // 电视端没有窗口概念：画中画/小窗没有意义，直接不提供该按钮
       if (!c.isTv)
         _KbAction(
@@ -407,27 +401,31 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           c.isRecording ? '停止录制' : '开始录制',
           hasChannel ? widget.onToggleRecord : null,
         ),
-      // 画面旋转：仅投屏时可用（投过来的竖屏视频需要转正）；
-      // 电视台直播没必要转，网页频道旋转还会触发页面重载，直接禁用
-      _KbAction(
-        'rotate',
-        Icons.screen_rotation,
-        c.videoRotation.value == 0
-            ? '旋转画面'
-            : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
-        c.isCasting ? c.cycleVideoRotation : null,
-      ),
+      // 画面旋转：仅投屏时提供（投过来的竖屏视频需要转正）；
+      // 电视台直播没必要转，网页频道旋转还会触发页面重载。
+      // 非投屏时直接不渲染——置灰按钮是无效占位，遥控器还会聚焦上去
+      if (c.isCasting)
+        _KbAction(
+          'rotate',
+          Icons.screen_rotation,
+          c.videoRotation.value == 0
+              ? '旋转画面'
+              : (c.videoRotation.value == 3 ? '恢复原始方向' : '继续旋转 90°'),
+          c.cycleVideoRotation,
+        ),
       // 听电视/锁定/设置：与安卓保持一致，统一收进返回键弹出的退出面板，
       // 底部只留播放相关按钮，避免窄窗口下图标挤压/与清晰度标签重叠
-      _KbAction(
-        'resolution',
-        null,
-        '清晰度',
-        // 投屏中清晰度不可用（投屏画面分辨率由发送端视频决定）
-        hasChannel && !c.isCasting ? () => _openResolutionMenu(c) : null,
-        // 打开菜单后面板要留着（菜单在面板内），不能按 OK 就收起
-        dismiss: false,
-      ),
+      // 清晰度：投屏时不显示——档位由发送端视频决定，投屏分辨率
+      // 已显示在左侧台标下方，这里再放一个置灰档位没有意义
+      if (!c.isCasting)
+        _KbAction(
+          'resolution',
+          null,
+          '清晰度',
+          hasChannel ? () => _openResolutionMenu(c) : null,
+          // 打开菜单后面板要留着（菜单在面板内），不能按 OK 就收起
+          dismiss: false,
+        ),
     ];
     _actions = actions;
     if (_kbId != null && !actions.any((a) => a.id == _kbId)) _kbId = null;
@@ -456,7 +454,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
   }
 
   Widget _resolutionButton(PlayerController c, _KbAction a) {
-    // 右侧按钮代表直播电视台的清晰度档位（投屏时置灰但仍显示当前档位）
+    // 右侧按钮代表直播电视台的清晰度档位（仅非投屏时渲染）
     final label = c.resolution;
     final selected = _kbId == a.id;
     return _wrapSelected(
@@ -624,7 +622,8 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         ),
       );
     }
-    // 旋转按钮的颜色随旋转状态变化（0=原始方向灰白，90° 高亮琥珀色）
+    // 旋转按钮的颜色随旋转状态变化（0=原始方向灰白，90° 高亮琥珀色）；
+    // 该按钮仅在投屏时渲染，onPressed 恒非空
     if (a.id == 'rotate') {
       return _wrapSelected(
         selected,
@@ -632,9 +631,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
           valueListenable: context.read<PlayerController>().videoRotation,
           builder: (context, rot, _) => IconButton(
             icon: Icon(Icons.screen_rotation,
-                color: a.onPressed == null
-                    ? Colors.white24
-                    : (rot == 0 ? Colors.white54 : Colors.amber),
+                color: rot == 0 ? Colors.white54 : Colors.amber,
                 size: iconSize),
             onPressed: a.onPressed,
             tooltip: a.tooltip,
@@ -642,11 +639,7 @@ class BottomProgramPanelState extends State<BottomProgramPanel> {
         ),
       );
     }
-    final iconColor = a.id == 'listen' && context.read<PlayerController>().listenMode
-        ? Colors.amber
-        : (a.id == 'lock' && context.read<PlayerController>().locked
-            ? Colors.amber
-            : (a.onPressed == null ? Colors.white24 : Colors.white));
+    final iconColor = a.onPressed == null ? Colors.white24 : Colors.white;
     return _wrapSelected(
       selected,
       IconButton(

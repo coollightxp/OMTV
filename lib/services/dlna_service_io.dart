@@ -603,7 +603,22 @@ class DlnaService {
     final sid = _sidFor(path);
     final peerHost =
         h.value('X-Forwarded-For') ?? req.connectionInfo?.remoteAddress.address ?? '';
-    _subs[path]?.expireTimer.cancel();
+    // 不同设备的新订阅顶掉旧订阅（换手机投屏）：按规范先给旧订阅端
+    // 补发一条「无媒体」断联事件，否则旧手机会一直显示"投屏中"。
+    // 同 IP 重复订阅（App 重开/崩溃重建）是同一会话，不通知。
+    final old = _subs[path];
+    if (old != null &&
+        path.contains('AVTransport') &&
+        _currentUri != null &&
+        _currentUri!.isNotEmpty &&
+        old.peerHost.isNotEmpty &&
+        peerHost.isNotEmpty &&
+        old.peerHost != peerHost) {
+      CastLog.write(
+          'DLNA sub replaced by $peerHost (was ${old.peerHost}), notify old peer');
+      unawaited(_notify(old, _noMediaEventBody()));
+    }
+    old?.expireTimer.cancel();
     final sub = _EventSubscription(
         sid: sid, callback: callback, peerHost: peerHost);
     _subs[path] = sub;
@@ -705,6 +720,29 @@ class DlnaService {
         '<CurrentTrackDuration val="$dur"/>'
         '<RelativeTimePosition val="$pos"/>'
         '<AbsoluteTimePosition val="$pos"/>'
+        '</InstanceID>';
+    final lastChange = _xmlEscape(
+        '<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/">$inner</Event>');
+    return '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">'
+        '<e:property><LastChange>$lastChange</LastChange></e:property>'
+        '</e:propertyset>';
+  }
+
+  /// 「无媒体」断联事件体：STOPPED + Track 0 + 空 URI。
+  /// 专用于主动通知【旧】订阅端投屏会话已被接管/结束——此时
+  /// _currentUri 可能已被新投屏改写，不能走 _avtEventBody()。
+  String _noMediaEventBody() {
+    const inner = '<InstanceID val="0">'
+        '<TransportState val="STOPPED"/>'
+        '<TransportStatus val="OK"/>'
+        '<CurrentTrack val="0"/>'
+        '<AVTransportURI val=""/>'
+        '<AVTransportURIMetaData val=""/>'
+        '<CurrentTrackURI val=""/>'
+        '<CurrentTrackMetaData val=""/>'
+        '<CurrentTrackDuration val=""/>'
+        '<RelativeTimePosition val=""/>'
+        '<AbsoluteTimePosition val=""/>'
         '</InstanceID>';
     final lastChange = _xmlEscape(
         '<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/">$inner</Event>');
@@ -828,6 +866,25 @@ class DlnaService {
     if (service.contains('AVTransport')) {
       switch (action) {
         case 'SetAVTransportURI':
+          // 不同设备直接推新地址顶投（未先订阅事件）：旧发送端不再持有
+          // 会话，按规范给它补发「无媒体」断联事件并移除其订阅，
+          // 否则旧手机会一直显示"投屏中"、点断开无反应。
+          // 同 IP 推新片（序列连播）是同一会话续投，不通知、保留订阅。
+          if (_currentUri != null && _currentUri!.isNotEmpty) {
+            final fromHost = req.headers.value('X-Forwarded-For') ??
+                req.connectionInfo?.remoteAddress.address ?? '';
+            final oldSub = _subs['/event/AVTransport'];
+            if (oldSub != null &&
+                fromHost.isNotEmpty &&
+                oldSub.peerHost.isNotEmpty &&
+                oldSub.peerHost != fromHost) {
+              CastLog.write(
+                  'DLNA SetURI takeover from $fromHost (was ${oldSub.peerHost}), notify old peer');
+              oldSub.expireTimer.cancel();
+              _subs.removeWhere((_, s) => s.sid == oldSub.sid);
+              unawaited(_notify(oldSub, _noMediaEventBody()));
+            }
+          }
           _currentUri = _extract(body, 'CurrentURI');
           _currentTitle = _extractCastTitle(body);
           _currentMetaData = _extract(body, 'CurrentURIMetaData');

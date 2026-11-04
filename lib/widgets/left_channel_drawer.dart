@@ -722,6 +722,38 @@ class _ChannelTile extends StatelessWidget {
     this.keyboardSelected = false,
   });
 
+  /// 频道台标：内置频道用 assets 台标，M3U 频道用网络 logo，
+  /// 无 logo 或加载失败时回退到通用电视图标占位
+  Widget _buildChannelLogo() {
+    Widget placeholder() => Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.blueAccent : Colors.white10,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            Icons.tv,
+            color: isSelected ? Colors.white : Colors.white70,
+            size: 18,
+          ),
+        );
+    final logo = channel.logoUrl;
+    if (logo.isEmpty) return placeholder();
+    final image = logo.startsWith('assets/')
+        ? Image.asset(logo,
+            width: 34,
+            height: 34,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => placeholder())
+        : Image.network(logo,
+            width: 34,
+            height: 34,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => placeholder());
+    return ClipRRect(borderRadius: BorderRadius.circular(8), child: image);
+  }
+
   @override
   Widget build(BuildContext context) {
     return InkWell(
@@ -764,19 +796,7 @@ class _ChannelTile extends StatelessWidget {
                 ),
               ),
             ),
-            Container(
-              width: 34,
-              height: 34,
-              decoration: BoxDecoration(
-                color: isSelected ? Colors.blueAccent : Colors.white10,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                Icons.tv,
-                color: isSelected ? Colors.white : Colors.white70,
-                size: 18,
-              ),
-            ),
+            _buildChannelLogo(),
             const SizedBox(width: 8),
             Expanded(
               child: Column(

@@ -552,6 +552,10 @@ jobs:
           class MainActivity : FlutterActivity() {
               private var channel: MethodChannel? = null
 
+              /** 自动画中画开关：Dart 在播放状态变化时同步
+               *  （仅播放中且非听电视/投屏/电视端时置 true） */
+              private var autoPipArmed = false
+
               /** DLNA/SSDP 组播锁（见 acquireMulticastLock） */
               private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
 
@@ -567,6 +571,23 @@ jobs:
                   super.onCreate(savedInstanceState)
                   ensureNotificationPermission()
                   acquireMulticastLock()
+              }
+
+              /** 用户按 Home/切到别的应用：正在播放时自动进入画中画小窗。
+               *  Android 12+ 由 setAutoEnterEnabled 接管，这里只补 Android 8–11 */
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  if (!autoPipArmed) return
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                      Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return
+                  try {
+                      val params = PictureInPictureParams.Builder()
+                          .setAspectRatio(Rational(16, 9))
+                          .build()
+                      setPictureInPictureParams(params)
+                      enterPictureInPictureMode(params)
+                  } catch (_: Exception) {
+                  }
               }
 
               /** DLNA/SSDP 组播锁：安卓默认过滤组播包（尤其 WiFi 省电模式），
@@ -658,6 +679,22 @@ jobs:
                           "exit" -> result.success(true)
                           "background" -> {
                               moveTaskToBack(true)
+                              result.success(true)
+                          }
+                          "setAutoPip" -> {
+                              autoPipArmed = call.argument<Boolean>("armed") ?: false
+                              // Android 12+：手势回桌面/切应用由 autoEnter 接管，
+                              // onUserLeaveHint 对手势导航不一定触发
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                  try {
+                                      setPictureInPictureParams(
+                                          PictureInPictureParams.Builder()
+                                              .setAspectRatio(Rational(16, 9))
+                                              .setAutoEnterEnabled(autoPipArmed)
+                                              .build())
+                                  } catch (_: Exception) {
+                                  }
+                              }
                               result.success(true)
                           }
                           "audioUpdate" -> {

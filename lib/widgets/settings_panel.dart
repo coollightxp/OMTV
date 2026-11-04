@@ -220,15 +220,33 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                     onChanged: (v) => controller.updateSettings(
                                         s.copyWith(startFullscreen: v)),
                                   ),
-                                  _switchTile(
-                                    icon: Icons.cast,
-                                    title: '接收投屏（DLNA）',
-                                    subtitle: '允许手机、电脑把视频投到本机播放',
-                                    value: s.dlnaEnabled,
-                                    onChanged: (v) => controller.updateSettings(
-                                        s.copyWith(dlnaEnabled: v)),
-                                  ),
                                 ],
+
+                                // 投屏全平台可用（安卓手机/盒子同样跑 DLNA 服务），
+                                // 不能收进桌面专属的「系统」分组，否则安卓关不掉
+                                _section('投屏'),
+                                _switchTile(
+                                  icon: Icons.cast,
+                                  title: '接收投屏（DLNA）',
+                                  subtitle: '允许手机、电脑把视频投到本机播放',
+                                  value: s.dlnaEnabled,
+                                  onChanged: (v) => controller.updateSettings(
+                                      s.copyWith(dlnaEnabled: v)),
+                                ),
+                                _segmentTile<int>(
+                                  icon: Icons.more_time,
+                                  title: '播完等待续投',
+                                  subtitle: '投屏视频播完后等待发送端推下一集，'
+                                      '超时自动断开回直播；「一直等」则保持投屏，'
+                                      '直到新投屏到来或手动断开',
+                                  segments: const [5, 15, 30, 60, -1],
+                                  selected: s.castEndWaitSec,
+                                  labelOf: (v) => v < 0
+                                      ? '一直等'
+                                      : (v >= 60 ? '1 分钟' : '$v 秒'),
+                                  onSelected: (v) => controller.updateSettings(
+                                      s.copyWith(castEndWaitSec: v)),
+                                ),
 
                                 _section('快捷键'),
                                 _shortcuts(controller.isDesktop),
@@ -416,7 +434,9 @@ class _SettingsPanelState extends State<SettingsPanel> {
       ['C', '频道列表'],
       ['E', '节目单'],
       ['S', '设置'],
-      ['R', '录制'],
+      // 录制仅桌面端实现（_toggleRecording 非桌面直接 return），
+      // 安卓上显示这行属于错误说明
+      if (desktop) ['R', '录制'],
       ['↑ / ↓', '切换频道'],
       ['← / →', '拖动进度（点播）'],
       ['数字键', '直接输入频道号'],

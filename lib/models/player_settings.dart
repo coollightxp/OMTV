@@ -27,7 +27,11 @@ class PlayerSettings {
   /// DLNA 投屏接收服务开关（默认开）
   final bool dlnaEnabled;
 
-  /// 网页缓冲秒数（仅展示用，修改后重启生效）
+  /// 投屏视频播完后的等待续投时间（秒）：窗口内发送端可继续推下一集；
+  /// 超时自动断开回直播；-1 = 一直等，直到新投屏、发送端停止或手动断开
+  final int castEndWaitSec;
+
+  /// 网页缓冲秒数（换台/重新起播后生效）
   final int bufferSeconds;
 
   /// 界面字体缩放（1.0 = 系统默认；4K/8K 大屏可调到 1.5~3.0）
@@ -55,6 +59,7 @@ class PlayerSettings {
     this.showClock = false,
     this.alwaysOnTop = true,
     this.dlnaEnabled = true,
+    this.castEndWaitSec = 15,
     this.bufferSeconds = 5,
     this.uiScale = 1.0,
     this.uiScaleAuto = true,
@@ -73,6 +78,7 @@ class PlayerSettings {
     bool? showClock,
     bool? alwaysOnTop,
     bool? dlnaEnabled,
+    int? castEndWaitSec,
     int? bufferSeconds,
     double? uiScale,
     bool? uiScaleAuto,
@@ -90,6 +96,7 @@ class PlayerSettings {
       showClock: showClock ?? this.showClock,
       alwaysOnTop: alwaysOnTop ?? this.alwaysOnTop,
       dlnaEnabled: dlnaEnabled ?? this.dlnaEnabled,
+      castEndWaitSec: castEndWaitSec ?? this.castEndWaitSec,
       bufferSeconds: bufferSeconds ?? this.bufferSeconds,
       uiScale: uiScale ?? this.uiScale,
       uiScaleAuto: uiScaleAuto ?? this.uiScaleAuto,

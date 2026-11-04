@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show exit;
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -212,6 +213,22 @@ class PlayerController extends ChangeNotifier {
       }
     }
     return result;
+  }
+
+  /// 已同步给原生的「切后台自动画中画」开关状态（去重，避免每次刷新都走通道）
+  bool _autoPipSynced = false;
+
+  /// 播放状态可能从多处改变（内核回调/网页 JS/切台/投屏），统一在
+  /// notifyListeners 出口处同步：播放中（非听电视/投屏/电视端）时，
+  /// 安卓按 Home 或切到别的应用会自动进入画中画小窗
+  @override
+  void notifyListeners() {
+    super.notifyListeners();
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final armed = isPlaying && !_listenMode && !_isCasting && !_isTv;
+    if (armed == _autoPipSynced) return;
+    _autoPipSynced = armed;
+    setAutoPip(armed);
   }
 
   PlayerController() {
@@ -569,6 +586,22 @@ class PlayerController extends ChangeNotifier {
 
   /// 停止 DLNA 投屏接收服务（设置面板开关）
   void _stopDlna() {
+    // 投屏进行中关闭开关：先向发送端推「无媒体」断联事件，
+    // 延迟片刻等 NOTIFY 发出后再停 HTTP 服务——直接杀服务的话，
+    // 手机端会卡在"投屏中"界面不知已断开。
+    if (_isCasting) {
+      dlnaService.clearCurrentMedia();
+      stopCastAndRestore();
+      Timer(const Duration(milliseconds: 800), () {
+        // 等待期间用户又重新打开了开关：服务已是新实例，别误停
+        if (_settings.dlnaEnabled) return;
+        dlnaService.stop();
+        _dlnaRunning = false;
+        _dlnaEndpoint = '';
+        notifyListeners();
+      });
+      return;
+    }
     dlnaService.stop();
     _dlnaRunning = false;
     _dlnaEndpoint = '';
@@ -1669,20 +1702,25 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     // 投屏点播内容正常播完：状态切到 ended（DLNA 上报 STOPPED），
-    // 发送端据此知道视频结束。上报后等 5 秒，发送端若没主动 Stop/换片，
-    // 就自动切回投屏前频道，避免停在最后一帧等用户手动断开。
+    // 发送端据此知道视频结束。随后进入「等待续投」窗口（设置项），
+    // 给发送端时间推下一集（序列连播）：窗口内收到新 SetURI 会取消
+    // 本 timer 继续投屏；超时说明没有续投，自动断开回投屏前频道。
+    // -1 = 一直等：停在结束画面，直到新投屏、发送端 Stop 或手动断开。
     if (_isCasting &&
         v.isCompleted &&
         _state == PlayerState.playing) {
       _state = PlayerState.ended;
       notifyListeners();
       _castEndedTimer?.cancel();
-      _castEndedTimer = Timer(const Duration(seconds: 5), () {
-        _castEndedTimer = null;
-        if (_isCasting && _state == PlayerState.ended) {
-          stopCastAndRestore();
-        }
-      });
+      final waitSec = _settings.castEndWaitSec;
+      if (waitSec >= 0) {
+        _castEndedTimer = Timer(Duration(seconds: waitSec), () {
+          _castEndedTimer = null;
+          if (_isCasting && _state == PlayerState.ended) {
+            stopCastAndRestore();
+          }
+        });
+      }
     }
   }
 
@@ -1884,8 +1922,13 @@ class PlayerController extends ChangeNotifier {
         await nextChannel();
         break;
       case 'close':
-        // 通知栏 ❌ / 系统媒体停止：退出听电视并暂停，App 留在后台
-        await _closeListenAndPause();
+        // 安卓通知栏/锁屏 ❌：直接关闭程序，不留后台播放
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          await _quitFromListenCard();
+        } else {
+          // Windows 托盘/任务栏 ❌：退出听电视并暂停，App 留在后台
+          await _closeListenAndPause();
+        }
         break;
       case 'stop':
         // Windows 托盘菜单「退出听电视」：恢复窗口回到画面
@@ -2013,6 +2056,18 @@ class PlayerController extends ChangeNotifier {
       await Future.delayed(const Duration(milliseconds: 800));
       if (isPlaying) await togglePlayPause();
     }
+  }
+
+  /// 安卓听电视卡片 ❌：停播后结束进程。
+  /// 前台服务与界面同进程，exit(0) 一并清掉，避免网页播放器在后台悄悄出声
+  Future<void> _quitFromListenCard() async {
+    try {
+      if (isPlaying) await togglePlayPause();
+    } catch (_) {}
+    try {
+      await audioStop();
+    } catch (_) {}
+    exit(0);
   }
 
   /// 上一次下发给通知栏卡片的内容签名（避免每 500ms 重复调用原生）
@@ -2150,6 +2205,7 @@ class PlayerController extends ChangeNotifier {
   static const _kShowClock = 'omtv_settings_show_clock';
   static const _kAlwaysOnTop = 'omtv_settings_always_on_top';
   static const _kDlnaEnabled = 'omtv_settings_dlna_enabled';
+  static const _kCastEndWait = 'omtv_settings_cast_end_wait';
   static const _kDefaultVolume = 'omtv_settings_default_volume';
   static const _kDefaultBrightness = 'omtv_settings_default_brightness';
   static const _kBufferSeconds = 'omtv_settings_buffer_seconds';
@@ -2173,6 +2229,7 @@ class PlayerController extends ChangeNotifier {
         // 置顶默认开：避免窗口失焦后快捷键失灵
         alwaysOnTop: p.getBool(_kAlwaysOnTop) ?? true,
         dlnaEnabled: p.getBool(_kDlnaEnabled) ?? true,
+        castEndWaitSec: p.getInt(_kCastEndWait) ?? 15,
         defaultVolume: p.getDouble(_kDefaultVolume) ?? 0.8,
         defaultBrightness: p.getDouble(_kDefaultBrightness) ?? 0.8,
         bufferSeconds: p.getInt(_kBufferSeconds) ?? 5,
@@ -2201,6 +2258,7 @@ class PlayerController extends ChangeNotifier {
       await p.setBool(_kShowClock, _settings.showClock);
       await p.setBool(_kAlwaysOnTop, _settings.alwaysOnTop);
       await p.setBool(_kDlnaEnabled, _settings.dlnaEnabled);
+      await p.setInt(_kCastEndWait, _settings.castEndWaitSec);
       await p.setDouble(_kDefaultVolume, _settings.defaultVolume);
       await p.setDouble(_kDefaultBrightness, _settings.defaultBrightness);
       await p.setInt(_kBufferSeconds, _settings.bufferSeconds);
@@ -3213,6 +3271,9 @@ class PlayerController extends ChangeNotifier {
     }
     _disposeVideoController();
     WakelockPlus.disable();
+    // 退出时若正在投屏：先向发送端推「无媒体」断联事件（best-effort，
+    // 进程可能随即退出，但至少发出一个 NOTIFY），再停 DLNA 服务
+    if (_isCasting) dlnaService.clearCurrentMedia();
     dlnaService.stop();
     _epgRefreshTimer?.cancel();
     xmltvEpg.dispose();
